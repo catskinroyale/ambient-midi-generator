@@ -59,7 +59,7 @@ jobs:
           New-Item -ItemType Directory $dir | Out-Null
           Copy-Item target/release/midigen.exe "$dir/Ambient MIDI Generator.exe"
           Copy-Item -Recurse soundfonts $dir/
-          Copy-Item README.md $dir/
+          Copy-Item README.md, LICENSE $dir/
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
           "ZIP=$dir.zip" >> $env:GITHUB_ENV
 

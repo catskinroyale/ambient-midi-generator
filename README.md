@@ -50,3 +50,7 @@ cargo test --release
 ```
 
 The tests check that output is deterministic, that pieces hit the target length, that every style works with every instrument choice, that the recipe survives a MIDI round trip, and that render levels and speed are reasonable.
+
+## Licence
+
+The code is released under the [MIT License](LICENSE). The bundled GeneralUser GS SoundFont in `soundfonts/` is not covered by it. It has its own licence, in `soundfonts/GeneralUser-GS-LICENSE.txt`.
