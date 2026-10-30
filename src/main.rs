@@ -1,14 +1,21 @@
 // No console window behind the app in Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod app;
+mod fonts;
 mod generator;
+#[cfg(target_os = "macos")]
+mod menu;
 mod midi_export;
 mod player;
+mod project;
+mod reverb;
 mod rng;
 mod song;
 mod synth;
 mod theory;
+mod update;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

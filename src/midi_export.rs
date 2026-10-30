@@ -22,7 +22,7 @@ pub fn to_bytes(song: &Song) -> std::io::Result<Vec<u8>> {
     let names: Vec<(Inst, String)> = song
         .instruments()
         .into_iter()
-        .map(|i| (i, format!("{} ({})", crate::song::sound_name(song.program(i)), i.role())))
+        .map(|i| (i, format!("{} ({})", song.sound_name(i), i.role())))
         .collect();
 
     let mut tracks: Vec<Vec<TrackEvent>> = Vec::new();
@@ -58,16 +58,24 @@ pub fn to_bytes(song: &Song) -> std::io::Result<Vec<u8>> {
             })
         });
 
-        let mut track = vec![
-            meta(0, MetaMessage::TrackName(name.as_bytes())),
-            TrackEvent {
+        let mut track = vec![meta(0, MetaMessage::TrackName(name.as_bytes()))];
+        let bank = song.bank(*inst);
+        if bank != 0 {
+            track.push(TrackEvent {
                 delta: u28::new(0),
                 kind: TrackEventKind::Midi {
                     channel: ch,
-                    message: MidiMessage::ProgramChange { program: u7::new(song.program(*inst)) },
+                    message: MidiMessage::Controller { controller: u7::new(0), value: u7::new(bank) },
                 },
+            });
+        }
+        track.push(TrackEvent {
+            delta: u28::new(0),
+            kind: TrackEventKind::Midi {
+                channel: ch,
+                message: MidiMessage::ProgramChange { program: u7::new(song.program(*inst)) },
             },
-        ];
+        });
         let mut last = 0u32;
         for (t, e) in abs {
             let message = match e {

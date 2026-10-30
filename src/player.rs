@@ -13,7 +13,8 @@ use crate::synth::SynthEngine;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
-    Program(u8),
+    /// Bank select, then program change.
+    Program(u8, u8),
     Ctrl(u8, u8),
     On(u8, u8),
     Off(u8),
@@ -45,7 +46,7 @@ impl Timeline {
     pub fn from_song(song: &Song) -> Self {
         let mut events = Vec::new();
         for inst in song.instruments() {
-            events.push(Event { time: 0.0, ch: inst.channel(), kind: Kind::Program(song.program(inst)) });
+            events.push(Event { time: 0.0, ch: inst.channel(), kind: Kind::Program(song.bank(inst), song.program(inst)) });
         }
         for c in &song.ctrls {
             events.push(Event { time: song.tick_to_secs(c.tick), ch: c.inst.channel(), kind: Kind::Ctrl(c.cc, c.value) });
@@ -57,12 +58,12 @@ impl Timeline {
             let ch = n.inst.channel();
             events.push(Event { time: start, ch, kind: Kind::On(n.key, n.vel) });
             events.push(Event { time: end, ch, kind: Kind::Off(n.key) });
-            if crate::song::program_sustains(song.program(n.inst)) {
+            if song.sustains(n.inst) {
                 spans.push(Span { start, end, ch, key: n.key, vel: n.vel });
             }
         }
         let order = |k: &Kind| match k {
-            Kind::Program(_) => 0,
+            Kind::Program(..) => 0,
             Kind::Off(_) => 1,
             Kind::Ctrl(..) => 2,
             Kind::On(..) => 3,
@@ -105,7 +106,10 @@ impl Sequencer {
         while self.idx < tl.events.len() && tl.events[self.idx].time < self.pos {
             let e = tl.events[self.idx];
             match e.kind {
-                Kind::Program(p) => self.engine.program(e.ch, p),
+                Kind::Program(b, p) => {
+                    self.engine.control(e.ch, 0, b);
+                    self.engine.program(e.ch, p);
+                }
                 Kind::Ctrl(c, v) => self.engine.control(e.ch, c, v),
                 _ => {}
             }
@@ -130,7 +134,10 @@ impl Sequencer {
                 while self.idx < tl.events.len() && tl.events[self.idx].time < block_end {
                     let e = tl.events[self.idx];
                     match e.kind {
-                        Kind::Program(p) => self.engine.program(e.ch, p),
+                        Kind::Program(b, p) => {
+                            self.engine.control(e.ch, 0, b);
+                            self.engine.program(e.ch, p);
+                        }
                         Kind::Ctrl(c, v) => self.engine.control(e.ch, c, v),
                         Kind::On(k, v) => self.engine.note_on(e.ch, k, v),
                         Kind::Off(k) => self.engine.note_off(e.ch, k),
@@ -159,6 +166,7 @@ pub enum Cmd {
     Seek(f64),
     Volume(f32),
     Looping(bool),
+    SetFx(crate::song::Fx),
 }
 
 pub struct Player {
@@ -267,6 +275,7 @@ impl AudioState {
                 Cmd::Seek(t) => self.seq.seek(t),
                 Cmd::Volume(v) => self.volume = v,
                 Cmd::Looping(l) => self.looping = l,
+                Cmd::SetFx(fx) => self.seq.engine.set_fx(&fx),
             }
         }
         let frames = data.len() / channels.max(1);
@@ -378,6 +387,27 @@ mod tests {
         crate::midi_export::save(&song, &dir).unwrap();
         let back = crate::midi_export::read_recipe(&dir).unwrap();
         assert_eq!(back, p);
+
+        // a SoundFont preset is written as bank select + program, and kept in the recipe
+        let mut p2 = p.clone();
+        let preset = crate::song::FontPreset { font: "Felt.sf2".into(), bank: 8, preset: 3, name: "Felt Piano".into() };
+        p2.set_font(crate::song::Inst::Piano, Some(preset));
+        let song2 = generate(&p2);
+        crate::midi_export::save(&song2, &dir).unwrap();
+        assert_eq!(crate::midi_export::read_recipe(&dir).unwrap(), p2);
+        let data2 = std::fs::read(&dir).unwrap();
+        let smf2 = midly::Smf::parse(&data2).unwrap();
+        let piano = smf2
+            .tracks
+            .iter()
+            .find(|t| t.iter().any(|e| matches!(e.kind, midly::TrackEventKind::Meta(midly::MetaMessage::TrackName(n)) if n == b"Felt Piano (Keys)")))
+            .expect("piano track named after its preset");
+        let midi: Vec<_> = piano.iter().filter_map(|e| match e.kind {
+            midly::TrackEventKind::Midi { message, .. } => Some(message),
+            _ => None,
+        }).take(2).collect();
+        assert!(matches!(midi[0], midly::MidiMessage::Controller { controller, value } if controller == 0 && value == 8));
+        assert!(matches!(midi[1], midly::MidiMessage::ProgramChange { program } if program == 3));
         let data = std::fs::read(&dir).unwrap();
         let smf = midly::Smf::parse(&data).unwrap();
         let ons: usize = smf
@@ -416,5 +446,47 @@ mod soundfont_tests {
             println!("SF2 {inst:?}: peak {peak:.2}");
             assert!(peak > 0.02);
         }
+    }
+
+    /// A part given its own preset from a second SoundFont, with the built-in
+    /// synth as the main sound.
+    #[test]
+    fn part_plays_through_its_own_soundfont() {
+        use crate::fonts::LoadedFont;
+        use crate::song::Inst;
+        use crate::synth::{BuiltinSynth, MixSynth};
+        let Ok(font) = LoadedFont::load(std::path::Path::new("soundfonts/GeneralUser-GS.sf2")) else { return };
+        let harp = font.presets.iter().find(|p| p.bank == 0 && p.preset == 46).unwrap();
+        let mut p = Params { style: Style::CinematicSwell, target_seconds: 40.0, ..Params::default() };
+        let song = generate(&p);
+        let pad = Inst::StringPad;
+        assert!(song.instruments().contains(&pad));
+        p.set_font(pad, Some(font.preset_for(harp)));
+        // only the pad, so all the sound must come from the SoundFont
+        p.muted = Inst::ALL.into_iter().filter(|i| *i != pad).collect();
+        let song = generate(&p);
+        assert_eq!(song.sound_name(pad), harp.name);
+
+        let render = |route: bool| {
+            let mut mix = MixSynth::new(Box::new(BuiltinSynth::new(44100)));
+            if route {
+                let i = mix.add(Box::new(SoundFontSynth::new(&font.font, 44100).unwrap()));
+                mix.route(pad.channel(), i);
+            }
+            let mut seq = Sequencer::new(Box::new(mix), 44100);
+            seq.set_timeline(Arc::new(Timeline::from_song(&song)), 0.0);
+            let (mut l, mut r) = (vec![0.0f32; 1024], vec![0.0f32; 1024]);
+            let mut out = Vec::new();
+            while seq.render(&mut l, &mut r) {
+                out.extend_from_slice(&l);
+            }
+            out
+        };
+        let (sf, builtin) = (render(true), render(false));
+        let peak = sf.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        println!("pad via SoundFont harp: peak {peak:.2}");
+        assert!(peak > 0.02);
+        // and it's a different sound from the built-in synth's
+        assert!(sf.iter().zip(&builtin).any(|(a, b)| (a - b).abs() > 0.01));
     }
 }

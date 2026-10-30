@@ -7,13 +7,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
+use crate::about::About;
+use crate::fonts::{FontSource, LoadedFont};
+use crate::project::{self, FontEntry, Project};
 use crate::generator::generate;
 use crate::midi_export;
 use crate::player::{Cmd, Player, Timeline, render_wav};
 use crate::rng::Rng;
-use crate::song::{Inst, Instrumentation, LengthMode, Params, SOUNDS, Song, Style, sound_name};
-use crate::synth::{BuiltinSynth, SoundFontSynth, SynthEngine};
+use crate::song::{Fx, Inst, Instrumentation, LengthMode, Params, SOUNDS, Song, Space, Style, Tuning, sound_name};
+use crate::synth::{BuiltinSynth, MixSynth, SoundFontSynth, SynthEngine};
 use crate::theory::{Mode, NOTE_NAMES};
+use crate::update::{self, UpdateStatus};
 
 struct Export {
     progress: Arc<AtomicU32>,
@@ -28,7 +32,14 @@ pub struct App {
     timeline: Arc<Timeline>,
     player: Option<Player>,
     audio_error: Option<String>,
-    soundfont: Option<(String, Arc<rustysynth::SoundFont>)>,
+    fonts: Vec<LoadedFont>,
+    /// The SoundFont that plays every part without its own preset; None means
+    /// the built-in synth.
+    main_font: Option<String>,
+    /// Bumped whenever a font is loaded or removed, so the engine is rebuilt.
+    fonts_version: u32,
+    engine_sig: Option<EngineSig>,
+    assign: Option<Assign>,
     auto_regen: bool,
     looping: bool,
     volume: f32,
@@ -36,6 +47,62 @@ pub struct App {
     status: String,
     export: Option<Export>,
     seed_history: Vec<u64>,
+    /// Effects last sent to the player.
+    sent_fx: Option<Fx>,
+    dark: bool,
+    about: About,
+    #[cfg(target_os = "macos")]
+    menu: Option<crate::menu::AppMenu>,
+    /// Look for a newer release on GitHub at startup.
+    check_updates: bool,
+    update: Option<UpdateStatus>,
+    update_rx: Option<std::sync::mpsc::Receiver<UpdateStatus>>,
+    /// The SoundFont shipped with the app, which projects refer to rather than embed.
+    bundled_font: Option<PathBuf>,
+    /// The project file last opened or saved.
+    project_path: Option<PathBuf>,
+    /// The window title last set.
+    title: String,
+}
+
+/// Settings remembered between sessions.
+const KEY_DARK: &str = "dark_mode";
+const KEY_CHECK_UPDATES: &str = "check_updates";
+
+
+/// What the audio engine was built from: the main font, and which channels go
+/// to which other font.
+type EngineSig = (u32, Option<String>, Vec<(u8, String)>);
+
+/// The "assign SoundFont to parts" dialog.
+struct Assign {
+    font: String,
+    general_midi: bool,
+    as_main: bool,
+    rows: Vec<AssignRow>,
+}
+
+struct AssignRow {
+    inst: Inst,
+    on: bool,
+    pick: (u8, u8),
+    suggested: bool,
+}
+
+fn preset_label(bank: u8, preset: u8, name: &str) -> String {
+    if bank == 0 { format!("{:03} {name}", preset + 1) } else { format!("{bank}:{:03} {name}", preset + 1) }
+}
+
+/// A drop-down of a font's presets. Returns true if the choice changed.
+fn preset_combo(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, font: &LoadedFont, pick: &mut (u8, u8), width: f32) -> bool {
+    let before = *pick;
+    let text = font.find(pick.0, pick.1).map(|p| p.name.clone()).unwrap_or_else(|| "(missing preset)".into());
+    egui::ComboBox::from_id_salt(id).width(width).height(420.0).truncate().selected_text(text).show_ui(ui, |ui| {
+        for p in &font.presets {
+            ui.selectable_value(pick, (p.bank, p.preset), preset_label(p.bank, p.preset, &p.name));
+        }
+    });
+    *pick != before
 }
 
 fn time_seed() -> u64 {
@@ -80,7 +147,11 @@ fn inst_color(i: Inst) -> Color32 {
 }
 
 impl App {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let storage = cc.storage;
+        let dark = storage.and_then(|s| eframe::get_value(s, KEY_DARK)).unwrap_or(true);
+        let check_updates = storage.and_then(|s| eframe::get_value(s, KEY_CHECK_UPDATES)).unwrap_or(true);
+        apply_theme(&cc.egui_ctx, dark);
         let params = Params::default();
         let song = generate(&params);
         let timeline = Arc::new(Timeline::from_song(&song));
@@ -100,21 +171,49 @@ impl App {
             timeline,
             player,
             audio_error,
-            soundfont: None,
+            fonts: Vec::new(),
+            main_font: None,
+            fonts_version: 0,
+            engine_sig: None,
+            assign: None,
             auto_regen: true,
             looping: false,
             volume: 0.9,
             status: String::new(),
             export: None,
             seed_history: Vec::new(),
+            sent_fx: None,
+            dark,
+            about: About::default(),
+            #[cfg(target_os = "macos")]
+            menu: crate::menu::AppMenu::install(&cc.egui_ctx),
+            check_updates,
+            update: None,
+            update_rx: None,
+            bundled_font: default_soundfont(),
+            project_path: None,
+            title: String::new(),
         };
-        if let Some(path) = default_soundfont() {
-            app.load_soundfont_from(&path);
+        if check_updates {
+            app.start_update_check(&cc.egui_ctx);
         }
+        if let Some(path) = app.bundled_font.clone() {
+            app.main_font = app.add_font(&path);
+        }
+        app.sync_engine();
         app
     }
 
     fn regenerate(&mut self) {
+        // A recipe may name SoundFonts that aren't loaded here.
+        let missing: Vec<String> = self
+            .params
+            .fonts
+            .iter()
+            .filter(|(_, f)| self.font(&f.font).is_none())
+            .map(|(i, f)| format!("{} ({})", i.role(), f.font))
+            .collect();
+        self.params.fonts.retain(|(_, f)| self.fonts.iter().any(|l| l.name == f.font));
         self.song = generate(&self.params);
         self.timeline = Arc::new(Timeline::from_song(&self.song));
         self.generated_from = self.params.clone();
@@ -129,6 +228,12 @@ impl App {
             self.song.bars,
             fmt_time(self.song.duration_secs())
         );
+        if !missing.is_empty() {
+            self.status = format!(
+                "SoundFont not loaded for {}, so using the General MIDI sound instead",
+                missing.join(", ")
+            );
+        }
     }
 
     fn new_seed(&mut self) {
@@ -157,45 +262,376 @@ impl App {
         p.humanize = r.range_f(0.2, 0.6) as f32;
     }
 
+    fn font(&self, name: &str) -> Option<&LoadedFont> {
+        self.fonts.iter().find(|f| f.name == name)
+    }
+
+    fn engine_signature(&self) -> EngineSig {
+        let routes = self
+            .song
+            .params
+            .fonts
+            .iter()
+            .filter(|(_, f)| Some(&f.font) != self.main_font.as_ref())
+            .map(|(i, f)| (i.channel(), f.font.clone()))
+            .collect();
+        (self.fonts_version, self.main_font.clone(), routes)
+    }
+
+    /// The main engine, plus a SoundFont synth for each other font a part uses.
     fn engine_for(&self, sr: u32) -> Result<Box<dyn SynthEngine>, String> {
-        Ok(match &self.soundfont {
-            Some((_, font)) => Box::new(SoundFontSynth::new(font, sr)?),
+        let main: Box<dyn SynthEngine> = match self.main_font.as_deref().and_then(|n| self.font(n)) {
+            Some(f) => Box::new(SoundFontSynth::new(&f.font, sr)?),
             None => Box::new(BuiltinSynth::new(sr)),
-        })
+        };
+        let mut mix = MixSynth::new(main);
+        let mut added: Vec<(&str, usize)> = Vec::new();
+        for (inst, fp) in &self.song.params.fonts {
+            if Some(&fp.font) == self.main_font.as_ref() {
+                continue; // the main font plays it, with the part's bank and program
+            }
+            let Some(f) = self.font(&fp.font) else { continue };
+            let idx = match added.iter().find(|(n, _)| *n == fp.font) {
+                Some((_, i)) => *i,
+                None => {
+                    let i = mix.add(Box::new(SoundFontSynth::new(&f.font, sr)?));
+                    added.push((&fp.font, i));
+                    i
+                }
+            };
+            mix.route(inst.channel(), idx);
+        }
+        mix.set_fx(&self.params.fx);
+        Ok(Box::new(mix))
+    }
+
+    /// Rebuild the playback engine if the fonts or their routing changed.
+    fn sync_engine(&mut self) {
+        let sig = self.engine_signature();
+        if self.engine_sig.as_ref() == Some(&sig) {
+            return;
+        }
+        self.engine_sig = Some(sig);
+        if let Some(p) = &self.player {
+            match self.engine_for(p.sample_rate) {
+                Ok(e) => p.send(Cmd::SetEngine(e)),
+                Err(e) => self.status = e,
+            }
+        }
+    }
+
+    /// Ask GitHub for the latest release, in the background.
+    fn start_update_check(&mut self, ctx: &egui::Context) {
+        if matches!(self.update, Some(UpdateStatus::Checking)) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(update::check());
+            ctx.request_repaint();
+        });
+        self.update = Some(UpdateStatus::Checking);
+        self.update_rx = Some(rx);
+    }
+
+    fn poll_update_check(&mut self) {
+        if let Some(rx) = &self.update_rx {
+            if let Ok(status) = rx.try_recv() {
+                self.update = Some(status);
+                self.update_rx = None;
+            }
+        }
+    }
+
+    /// Send changed reverb and tuning settings to the player. They apply
+    /// straight away, without regenerating.
+    fn sync_fx(&mut self) {
+        if self.sent_fx == Some(self.params.fx) {
+            return;
+        }
+        self.sent_fx = Some(self.params.fx);
+        self.recipe_text = self.params.to_recipe();
+        if let Some(p) = &self.player {
+            p.send(Cmd::SetFx(self.params.fx));
+        }
     }
 
     fn load_soundfont(&mut self) {
         if let Some(path) = rfd::FileDialog::new().add_filter("SoundFont", &["sf2"]).pick_file() {
-            self.load_soundfont_from(&path);
+            if let Some(name) = self.add_font(&path) {
+                self.open_assign(&name);
+            }
         }
     }
 
-    fn load_soundfont_from(&mut self, path: &std::path::Path) {
-        let res = std::fs::File::open(path)
-            .map_err(|e| e.to_string())
-            .and_then(|mut f| rustysynth::SoundFont::new(&mut f).map_err(|e| format!("{e:?}")));
-        match res {
+    /// Load a font (replacing one with the same file name) and return its name.
+    fn add_font(&mut self, path: &std::path::Path) -> Option<String> {
+        match LoadedFont::load(path) {
             Ok(font) => {
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                self.soundfont = Some((name.clone(), Arc::new(font)));
-                self.status = format!("Loaded SoundFont {name}");
-                if let Some(p) = &self.player {
-                    match self.engine_for(p.sample_rate) {
-                        Ok(e) => p.send(Cmd::SetEngine(e)),
-                        Err(e) => self.status = e,
+                let name = font.name.clone();
+                self.status = format!("Loaded SoundFont {name} ({} presets)", font.presets.len());
+                self.fonts.retain(|f| f.name != name);
+                self.fonts.push(font);
+                self.fonts_version += 1;
+                Some(name)
+            }
+            Err(e) => {
+                self.status = format!("Could not load SoundFont: {e}");
+                None
+            }
+        }
+    }
+
+    fn remove_font(&mut self, name: &str) {
+        self.fonts.retain(|f| f.name != name);
+        if self.main_font.as_deref() == Some(name) {
+            self.main_font = None;
+        }
+        self.params.fonts.retain(|(_, f)| f.font != name);
+        self.fonts_version += 1;
+        self.status = format!("Removed SoundFont {name}");
+    }
+
+    /// Open the dialog that assigns a font's presets to parts, pre-filled with
+    /// suggestions.
+    fn open_assign(&mut self, name: &str) {
+        let Some(font) = self.font(name) else { return };
+        let general_midi = font.is_general_midi();
+        let rows = Inst::ALL
+            .into_iter()
+            .filter_map(|inst| {
+                let current = self.params.font(inst).filter(|f| f.font == name).map(|f| (f.bank, f.preset));
+                let (best, sure) = font.suggest(inst, self.params.sounds.get(inst))?;
+                // A General MIDI font becomes the main sound instead, so parts
+                // only get their own preset when the font has a clear match.
+                let on = current.is_some() || (!general_midi && sure && self.song.parts.contains(&inst));
+                let pick = current.unwrap_or((best.bank, best.preset));
+                Some(AssignRow { inst, on, pick, suggested: sure && !general_midi })
+            })
+            .collect();
+        self.assign = Some(Assign { font: name.to_string(), general_midi, as_main: general_midi, rows });
+    }
+
+    fn apply_assign(&mut self, a: Assign) {
+        let Some(font) = self.font(&a.font) else { return };
+        let mut changes = Vec::new();
+        for row in &a.rows {
+            let preset = font.find(row.pick.0, row.pick.1).map(|p| font.preset_for(p));
+            if row.on {
+                changes.push((row.inst, preset));
+            } else if self.params.font(row.inst).is_some_and(|f| f.font == a.font) {
+                changes.push((row.inst, None));
+            }
+        }
+        for (inst, preset) in changes {
+            self.params.set_font(inst, preset);
+        }
+        if a.as_main {
+            self.main_font = Some(a.font.clone());
+        }
+        let parts = a.rows.iter().filter(|r| r.on).count();
+        self.status = match (a.as_main, parts) {
+            (true, 0) => format!("{} is now the main sound", a.font),
+            (true, n) => format!("{} is now the main sound, with its own presets for {n} part(s)", a.font),
+            (false, 0) => format!("{} is loaded. Choose it for a part under Parts", a.font),
+            (false, n) => format!("{} now plays {n} part(s)", a.font),
+        };
+    }
+
+    fn assign_window(&mut self, ctx: &egui::Context) {
+        let Some(mut a) = self.assign.take() else { return };
+        let Some(font) = self.font(&a.font) else { return };
+        let parts = &self.song.parts;
+        let (mut apply, mut keep) = (false, true);
+        egui::Window::new("Assign SoundFont")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(&a.font).strong());
+                ui.label(egui::RichText::new(format!("{} presets", font.presets.len())).weak());
+                ui.add_space(4.0);
+                if a.general_midi {
+                    ui.label("This is a General MIDI SoundFont, so it has a sound for every part.");
+                    ui.checkbox(&mut a.as_main, "Use it as the main sound")
+                        .on_hover_text("Plays every part that isn't given its own preset below");
+                    ui.label(
+                        egui::RichText::new("Tick a part to give it a specific preset from this font.").small().weak(),
+                    );
+                } else {
+                    ui.label("Choose the parts this SoundFont should play.");
+                    ui.label(
+                        egui::RichText::new("Parts are pre-ticked where a preset name matches the part.")
+                            .small()
+                            .weak(),
+                    );
+                }
+                ui.add_space(6.0);
+                egui::Grid::new("assign").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+                    for row in &mut a.rows {
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            ui.painter().rect_filled(rect, 2.0, inst_color(row.inst));
+                            ui.checkbox(&mut row.on, row.inst.role()).on_hover_text(row.inst.role_hint());
+                        });
+                        if preset_combo(ui, ("assign", row.inst), font, &mut row.pick, 200.0) {
+                            row.on = true;
+                        }
+                        let note = if !parts.contains(&row.inst) {
+                            "not in this piece"
+                        } else if row.suggested {
+                            "suggested"
+                        } else {
+                            ""
+                        };
+                        ui.label(egui::RichText::new(note).small().weak());
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    apply = ui.button("Apply").clicked();
+                    if ui.button("Cancel").on_hover_text("The SoundFont stays loaded, for use under Parts").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+        if apply {
+            self.apply_assign(a);
+        } else if keep {
+            self.assign = Some(a);
+        }
+    }
+
+    fn is_bundled(&self, font: &LoadedFont) -> bool {
+        match (&font.source, &self.bundled_font) {
+            (Some(FontSource::File(p)), Some(b)) => p == b,
+            _ => false,
+        }
+    }
+
+    /// Save every setting and the loaded SoundFonts to a project file. Asks for
+    /// a file name the first time, or always with `save_as`.
+    fn save_project(&mut self, save_as: bool) {
+        let path = match (&self.project_path, save_as) {
+            (Some(p), false) => p.clone(),
+            _ => {
+                let name = self
+                    .project_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("{}.{}", self.params.file_stem(), project::EXTENSION));
+                let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Ambient project", &[project::EXTENSION])
+                    .set_file_name(name)
+                    .save_file()
+                else {
+                    return;
+                };
+                p
+            }
+        };
+        let mut entries = Vec::new();
+        let mut data = Vec::new();
+        for f in &self.fonts {
+            let path_text = match &f.source {
+                Some(FontSource::File(p)) => Some(p.display().to_string()),
+                _ => None,
+            };
+            let bundled = self.is_bundled(f);
+            let embedded = if bundled {
+                None
+            } else {
+                match f.bytes() {
+                    Ok(b) => {
+                        let n = b.len() as u64;
+                        data.push(b);
+                        Some(n)
+                    }
+                    Err(e) => {
+                        self.status = format!("Could not save project: can't read SoundFont {e}");
+                        return;
                     }
                 }
-            }
-            Err(e) => self.status = format!("Could not load SoundFont: {e}"),
+            };
+            entries.push(FontEntry { name: f.name.clone(), path: path_text, bundled, embedded });
         }
+        let settings = project::Settings { volume: self.volume, looping: self.looping, auto_regen: self.auto_regen };
+        let proj = Project::new(self.params.clone(), self.main_font.clone(), entries, settings);
+        let slices: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        self.status = match project::save(&path, &proj, &slices) {
+            Ok(()) => {
+                let embedded = data.len();
+                self.project_path = Some(path.clone());
+                format!(
+                    "Saved project {}{}",
+                    path.display(),
+                    if embedded > 0 { format!(" with {embedded} SoundFont(s) inside") } else { String::new() }
+                )
+            }
+            Err(e) => format!("Could not save project: {e}"),
+        };
     }
 
-    fn use_builtin(&mut self) {
-        self.soundfont = None;
-        if let Some(p) = &self.player {
-            p.send(Cmd::SetEngine(Box::new(BuiltinSynth::new(p.sample_rate))));
+    fn open_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Ambient project", &[project::EXTENSION]).pick_file() else {
+            return;
+        };
+        let (proj, data) = match project::load(&path) {
+            Ok(x) => x,
+            Err(e) => {
+                self.status = format!("Could not open {}: {e}", path.display());
+                return;
+            }
+        };
+        let mut data = data.into_iter();
+        let mut fonts = Vec::new();
+        let mut missing = Vec::new();
+        for entry in &proj.fonts {
+            let loaded = if entry.embedded.is_some() {
+                data.next().ok_or_else(|| "missing data".to_string()).and_then(|d| LoadedFont::from_bytes(entry.name.clone(), d))
+            } else {
+                // the bundled font from this copy of the app, else the original file
+                let candidates = [
+                    self.bundled_font.clone().filter(|_| entry.bundled),
+                    entry.path.as_ref().map(PathBuf::from),
+                ];
+                candidates
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p.exists())
+                    .find_map(|p| LoadedFont::load(&p).ok())
+                    .map(|mut f| {
+                        f.name = entry.name.clone();
+                        f
+                    })
+                    .ok_or_else(|| "file not found".to_string())
+            };
+            match loaded {
+                Ok(f) => fonts.push(f),
+                Err(e) => missing.push(format!("{} ({e})", entry.name)),
+            }
         }
-        self.status = "Using built-in synth".into();
+        self.fonts = fonts;
+        self.fonts_version += 1;
+        self.main_font = proj.main_font.filter(|n| self.fonts.iter().any(|f| &f.name == n));
+        self.params = proj.params;
+        self.volume = proj.settings.volume;
+        self.looping = proj.settings.looping;
+        self.auto_regen = proj.settings.auto_regen;
+        if let Some(p) = &self.player {
+            p.send(Cmd::Volume(self.volume));
+            p.send(Cmd::Looping(self.looping));
+        }
+        self.project_path = Some(path.clone());
+        self.regenerate();
+        if missing.is_empty() {
+            self.status = format!("Opened {}", path.display());
+        } else {
+            self.status = format!("Opened {}, but couldn't load SoundFont {}", path.display(), missing.join(", "));
+        }
     }
 
     fn save_midi(&mut self) {
@@ -253,9 +689,52 @@ impl App {
 
     fn controls(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.heading("Ambient Generator");
-        ui.add_space(4.0);
+        self.header(ui);
+        ui.add_space(6.0);
+        section(ui, "Piece", true, "Style, key, length and the character of the music", |ui| self.piece_ui(ui));
+        section(
+            ui,
+            "Parts",
+            true,
+            "Switch parts on or off and choose the sound each one plays. \
+             Switching a part off leaves the other parts exactly as they were.",
+            |ui| self.parts_ui(ui),
+        );
+        section(
+            ui,
+            "Reverb & tuning",
+            false,
+            "These change how the piece sounds, in playback and WAV export, but not its notes.",
+            |ui| self.fx_ui(ui),
+        );
+        section(ui, "Sound Fonts", false, "The built-in synth and SoundFonts", |ui| self.sound_ui(ui));
+        section(
+            ui,
+            "Recipe",
+            false,
+            "These settings + seed always reproduce exactly the same piece.",
+            |ui| self.recipe_ui(ui),
+        );
+    }
 
+    /// Title, theme switch and About.
+    fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Ambient Generator");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("ℹ").on_hover_text("About, licences and updates").clicked() {
+                    self.about.open = true;
+                }
+                let (icon, tip) = if self.dark { ("☀", "Switch to light mode") } else { ("🌙", "Switch to dark mode") };
+                if ui.button(icon).on_hover_text(tip).clicked() {
+                    self.dark = !self.dark;
+                    apply_theme(ui.ctx(), self.dark);
+                }
+            });
+        });
+    }
+
+    fn piece_ui(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("params").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             let p = &mut self.params;
             ui.label("Style");
@@ -336,16 +815,16 @@ impl App {
             }
             ui.end_row();
 
-            let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, hint: &str| {
-                ui.label(label).on_hover_text(hint);
-                ui.add(egui::Slider::new(v, 0.0..=1.0).fixed_decimals(2)).on_hover_text(hint);
-                ui.end_row();
-            };
-            slider(ui, "Density", &mut p.density, "How many notes: sparse to busy");
-            slider(ui, "Variation", &mut p.variation, "Harmonic substitutions, melodic leaps, evolving loops");
-            slider(ui, "Dynamics", &mut p.dynamics, "How much the piece builds towards a peak and recedes");
-            slider(ui, "Humanize", &mut p.humanize, "Timing and velocity looseness");
-            slider(ui, "Reverb", &mut p.reverb, "Reverb send (CC91) written to the MIDI file");
+            ranged(ui, "Density", &mut p.density, ("sparse", "busy"), "How many notes");
+            ranged(
+                ui,
+                "Variation",
+                &mut p.variation,
+                ("plain", "varied"),
+                "Harmonic substitutions, melodic leaps, evolving loops",
+            );
+            ranged(ui, "Dynamics", &mut p.dynamics, ("even", "dramatic"), "How much the piece builds towards a peak and recedes");
+            ranged(ui, "Humanize", &mut p.humanize, ("exact", "loose"), "Looseness of timing and velocity");
 
             ui.label("Seed");
             ui.horizontal(|ui| {
@@ -377,21 +856,15 @@ impl App {
         });
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.auto_regen, "Regenerate on change");
-            if !self.auto_regen || self.params != self.generated_from {
+            if !self.auto_regen || !self.params.same_music(&self.generated_from) {
                 if ui.button("Generate").clicked() {
                     self.regenerate();
                 }
             }
         });
+    }
 
-        ui.add_space(8.0);
-        ui.separator();
-        self.parts_ui(ui);
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(egui::RichText::new("Recipe").strong())
-            .on_hover_text("These settings + seed always reproduce exactly the same piece.");
+    fn recipe_ui(&mut self, ui: &mut egui::Ui) {
         ui.add(
             egui::TextEdit::multiline(&mut self.recipe_text)
                 .desired_rows(3)
@@ -416,32 +889,122 @@ impl App {
                 self.open_midi_recipe();
             }
         });
+    }
 
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(egui::RichText::new("Sound").strong());
+    fn sound_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let name = self.soundfont.as_ref().map(|s| s.0.clone()).unwrap_or_else(|| "Built-in synth".into());
-            ui.label(name);
+            ui.label("Main").on_hover_text("Plays every part that doesn't have its own SoundFont preset");
+            let main = self.main_font.clone().unwrap_or_else(|| "Built-in synth".into());
+            let w = (ui.available_width() - 16.0).clamp(120.0, 420.0);
+            egui::ComboBox::from_id_salt("main_font").width(w).truncate().selected_text(main).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.main_font, None, "Built-in synth");
+                for f in &self.fonts {
+                    ui.selectable_value(&mut self.main_font, Some(f.name.clone()), &f.name);
+                }
+            });
         });
-        ui.horizontal(|ui| {
-            if ui.button("Load SoundFont (.sf2)…").on_hover_text("Any General MIDI SoundFont, for realistic instruments").clicked() {
-                self.load_soundfont();
+        let mut assign = None;
+        let mut remove = None;
+        for f in &self.fonts {
+            // buttons on the right; a long name is shortened to fit beside them
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("✕").on_hover_text("Unload this SoundFont").clicked() {
+                    remove = Some(f.name.clone());
+                }
+                if ui.small_button("Assign…").on_hover_text("Choose which parts this SoundFont plays").clicked() {
+                    assign = Some(f.name.clone());
+                }
+                let kind = if f.is_general_midi() { "General MIDI" } else { "presets" };
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(&f.name).truncate())
+                        .on_hover_text(format!("{}\n{} {kind}", f.name, f.presets.len()));
+                });
+            });
+        }
+        if let Some(name) = assign {
+            self.open_assign(&name);
+        }
+        if let Some(name) = remove {
+            self.remove_font(&name);
+        }
+        if ui
+            .button("Load SoundFont (.sf2)…")
+            .on_hover_text("Load a SoundFont, then choose which parts it plays. You can load several.")
+            .clicked()
+        {
+            self.load_soundfont();
+        }
+    }
+
+    /// Reverb space and tuning. Apart from the reverb amount, which is written to
+    /// the MIDI file, these change the sound without regenerating.
+    fn fx_ui(&mut self, ui: &mut egui::Ui) {
+        let p = &mut self.params;
+        egui::Grid::new("fx").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            ui.label("Space");
+            egui::ComboBox::from_id_salt("space").width(130.0).selected_text(p.fx.space.label()).show_ui(ui, |ui| {
+                for s in Space::ALL {
+                    ui.selectable_value(&mut p.fx.space, s, s.label()).on_hover_text(s.description());
+                }
+            });
+            ui.end_row();
+            ui.label("");
+            ui.add(egui::Label::new(egui::RichText::new(p.fx.space.description()).small().weak()).wrap());
+            ui.end_row();
+
+            ranged(ui, "Amount", &mut p.reverb, ("dry", "wet"), "How much of each part goes into the reverb (also saved in the MIDI file)");
+            ranged(ui, "Size", &mut p.fx.size, ("short", "long"), "How long the tail lasts, from half to double the space's natural length");
+            ranged(ui, "Tone", &mut p.fx.tone, ("dark", "bright"), "How bright the reverb is");
+            ranged(ui, "Motion", &mut p.fx.motion, ("still", "swirling"), "How much the tail slowly moves and shimmers in pitch");
+            if p.fx.space == Space::Shimmer {
+                ranged(
+                    ui,
+                    "Feedback",
+                    &mut p.fx.shimmer,
+                    ("subtle", "intense"),
+                    "How much of the octave-up tail is fed back in: more climbs higher and leaves more shimmer artefacts",
+                );
+                ranged(
+                    ui,
+                    "Fb. detune",
+                    &mut p.fx.shimmer_detune,
+                    ("pure", "wide"),
+                    "Splits the shimmer feedback into a sharp and a flat copy, up to 35 cents either side of the octave, \
+                     so they beat and spread for more depth",
+                );
             }
-            if self.soundfont.is_some() && ui.button("Built-in").clicked() {
-                self.use_builtin();
-            }
+            ranged(
+                ui,
+                "Detune",
+                &mut p.fx.detune,
+                ("in tune", "detuned"),
+                "Pulls each part and note slightly off pitch and widens ensemble sounds, for a warmer, chorused sound",
+            );
+            ranged(ui, "Drift", &mut p.fx.drift, ("steady", "wobbly"), "Slow pitch wander, like an old tape or a worn record");
+
+            ui.label("Tuning");
+            egui::ComboBox::from_id_salt("tuning").width(170.0).selected_text(p.fx.tuning.label()).show_ui(ui, |ui| {
+                for t in Tuning::ALL {
+                    ui.selectable_value(&mut p.fx.tuning, t, t.label());
+                }
+            });
+            ui.end_row();
         });
+        if p.fx != Fx::default() && ui.small_button("Reset reverb & tuning").clicked() {
+            p.fx = Fx::default();
+        }
     }
 
     /// Per-part on/off switches and sound choice.
     fn parts_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Parts").strong()).on_hover_text(
-            "Switch parts on or off and choose the sound each one plays. \
-             Switching a part off leaves the other parts exactly as they were.",
-        );
         let parts = self.song.parts.clone();
-        egui::Grid::new("parts").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+        let main_name = self.main_font.clone().unwrap_or_else(|| "Built-in synth".into());
+        // share the panel's width between the font and sound drop-downs, so a
+        // long font or preset name is shortened rather than overflowing
+        let rest = (ui.available_width() - 100.0).max(200.0);
+        let source_w = (rest * 0.38).clamp(70.0, 220.0);
+        let sound_w = rest - source_w - 16.0;
+        egui::Grid::new("parts").num_columns(3).spacing([6.0, 6.0]).show(ui, |ui| {
             for inst in Inst::ALL {
                 let used = parts.contains(&inst);
                 let p = &mut self.params;
@@ -466,10 +1029,46 @@ impl App {
                         }
                     });
                 });
+                let fonts = &self.fonts;
+                let font = p.font(inst).and_then(|fp| fonts.iter().find(|f| f.name == fp.font));
                 ui.add_enabled_ui(used, |ui| {
+                    let source = font.map_or("Main", |f| f.name.as_str());
+                    egui::ComboBox::from_id_salt(("source", inst))
+                        .width(source_w)
+                        .truncate()
+                        .selected_text(source)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(font.is_none(), "Main")
+                                .on_hover_text(format!("A General MIDI sound, played by {main_name}"))
+                                .clicked()
+                            {
+                                p.set_font(inst, None);
+                            }
+                            for f in fonts {
+                                let on = font.is_some_and(|c| c.name == f.name);
+                                if ui.selectable_label(on, &f.name).clicked() && !on {
+                                    let pick = f.suggest(inst, p.sounds.get(inst)).map(|(b, _)| f.preset_for(b));
+                                    p.set_font(inst, pick);
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("Where this part's sound comes from");
+                });
+                ui.add_enabled_ui(used, |ui| {
+                    if let (Some(f), Some(fp)) = (font, p.font(inst)) {
+                        let mut pick = (fp.bank, fp.preset);
+                        if preset_combo(ui, ("preset", inst), f, &mut pick, sound_w) {
+                            let preset = f.find(pick.0, pick.1).map(|x| f.preset_for(x));
+                            p.set_font(inst, preset);
+                        }
+                        return;
+                    }
                     let current = p.sounds.get(inst);
                     egui::ComboBox::from_id_salt(("sound", inst))
-                        .width(170.0)
+                        .width(sound_w)
+                        .truncate()
                         .selected_text(sound_name(current))
                         .height(420.0)
                         .show_ui(ui, |ui| {
@@ -490,8 +1089,9 @@ impl App {
             if ui.small_button("All on").clicked() {
                 self.params.muted.clear();
             }
-            if ui.small_button("Default sounds").clicked() {
+            if ui.small_button("Default sounds").on_hover_text("General MIDI defaults, from the main sound").clicked() {
                 self.params.sounds = Default::default();
+                self.params.fonts.clear();
             }
         });
     }
@@ -527,7 +1127,21 @@ impl App {
             });
             ui.label(egui::RichText::new(format!("{} / {}", fmt_time(pos.min(dur)), fmt_time(dur))).monospace());
             ui.separator();
-            if ui.button("💾 Save MIDI…").clicked() {
+            let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
+            if ui.button("📂 Open…").on_hover_text(format!("Open a project ({cmd}O)")).clicked() {
+                self.open_project();
+            }
+            if ui
+                .button("💾 Save project")
+                .on_hover_text(format!(
+                    "Save all settings and the loaded SoundFonts in one file ({cmd}S; {cmd}⇧S to save as a new file)"
+                ))
+                .clicked()
+            {
+                self.save_project(false);
+            }
+            ui.separator();
+            if ui.button("🎼 Save MIDI…").clicked() {
                 self.save_midi();
             }
             let exporting = self.export.is_some();
@@ -541,6 +1155,12 @@ impl App {
         });
         if let Some(e) = &self.audio_error {
             ui.colored_label(Color32::LIGHT_RED, format!("Audio unavailable ({e}) — you can still save MIDI files."));
+        }
+        if let Some(UpdateStatus::Available { version, url }) = &self.update {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("⬆ Version {version} is available.")).strong());
+                ui.hyperlink_to("Download", url);
+            });
         }
         if !self.status.is_empty() {
             ui.label(egui::RichText::new(&self.status).weak());
@@ -634,7 +1254,7 @@ impl App {
             let label = format!(
                 "{}: {}{}",
                 i.role(),
-                sound_name(song.program(i)),
+                song.sound_name(i),
                 if muted { " (off)" } else { "" }
             );
             let tc = if muted { text_col.gamma_multiply(0.5) } else { text_col };
@@ -671,9 +1291,34 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, KEY_DARK, &self.dark);
+        eframe::set_value(storage, KEY_CHECK_UPDATES, &self.check_updates);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) && ui.ctx().memory(|m| m.focused().is_none()) {
             self.toggle_play();
+        }
+        let shift_cmd = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        if ui.ctx().input_mut(|i| i.consume_key(shift_cmd, egui::Key::S)) {
+            self.save_project(true);
+        } else if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+            self.save_project(false);
+        }
+        if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
+            self.open_project();
+        }
+        let title = match &self.project_path {
+            Some(p) => format!(
+                "{} — Ambient MIDI Generator",
+                p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            ),
+            None => "Ambient MIDI Generator".to_string(),
+        };
+        if title != self.title {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
         }
 
         if let Some(ex) = &mut self.export {
@@ -688,7 +1333,8 @@ impl eframe::App for App {
             }
         }
 
-        egui::Panel::left("controls").resizable(false).exact_size(340.0).show(ui, |ui| {
+        // drag the panel's edge to resize it; egui remembers the width
+        egui::Panel::left("controls").resizable(true).default_size(400.0).size_range(350.0..=900.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
         });
         egui::Panel::bottom("transport").show(ui, |ui| {
@@ -700,13 +1346,108 @@ impl eframe::App for App {
 
         // Wait until a slider drag is released so playback isn't constantly restarted.
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
-        if self.auto_regen && self.params != self.generated_from && !dragging {
+        if self.auto_regen && !self.params.same_music(&self.generated_from) && !dragging {
             self.regenerate();
         }
+        self.sync_fx();
+        self.assign_window(ui.ctx());
+        self.poll_update_check();
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &self.menu {
+            if menu.take_about_request() {
+                self.about.open = true;
+            }
+            if menu.take_check_request() {
+                self.about.open = true;
+                self.about.check_requested = true;
+            }
+        }
+        self.about.show(ui.ctx(), &self.update, &mut self.check_updates);
+        if std::mem::take(&mut self.about.check_requested) {
+            self.start_update_check(ui.ctx());
+        }
+        self.sync_engine();
 
         let busy = self.player.as_ref().map(|p| p.is_playing()).unwrap_or(false) || self.export.is_some();
         if busy {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
+}
+
+/// A 0..1 slider in a two-column grid, with words at each end saying which way
+/// is less and which is more.
+fn ranged(ui: &mut egui::Ui, label: &str, v: &mut f32, (less, more): (&str, &str), hint: &str) {
+    let tip = format!("{hint}. Slide left for {less}, right for {more}.");
+    ui.label(label).on_hover_text(&tip);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().slider_width = 120.0;
+        let end = |t: &str| egui::RichText::new(t).small().weak();
+        ui.allocate_ui_with_layout(
+            Vec2::new(54.0, ui.spacing().interact_size.y),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| ui.label(end(less)),
+        );
+        let pct = (*v * 100.0).round();
+        ui.add(egui::Slider::new(v, 0.0..=1.0).show_value(false)).on_hover_text(format!("{tip} Now {pct:.0}%."));
+        ui.label(end(more));
+    });
+    ui.end_row();
+}
+
+/// A collapsible section of the control panel. Whether it is open is
+/// remembered between sessions.
+fn section(ui: &mut egui::Ui, title: &str, open: bool, hint: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(2.0);
+    egui::CollapsingHeader::new(egui::RichText::new(title).strong().size(15.0))
+        .id_salt(title)
+        .default_open(open)
+        .show(ui, |ui| {
+            ui.add_space(2.0);
+            add(ui);
+            ui.add_space(6.0);
+        })
+        .header_response
+        .on_hover_text(hint);
+    ui.separator();
+}
+
+/// The colour themes. The dark one is a deep blue-grey that suits the piano
+/// roll; both share a soft blue accent.
+fn visuals(dark: bool) -> egui::Visuals {
+    let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    if dark {
+        let accent = Color32::from_rgb(110, 160, 230);
+        v.panel_fill = Color32::from_rgb(24, 26, 34);
+        v.window_fill = Color32::from_rgb(30, 32, 42);
+        v.extreme_bg_color = Color32::from_rgb(15, 16, 22);
+        v.faint_bg_color = Color32::from_rgb(32, 35, 46);
+        v.code_bg_color = Color32::from_rgb(36, 39, 52);
+        v.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 32, 42);
+        v.widgets.noninteractive.bg_stroke.color = Color32::from_rgb(48, 52, 66);
+        v.widgets.inactive.bg_fill = Color32::from_rgb(44, 48, 62);
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(40, 43, 56);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(56, 62, 80);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(52, 57, 74);
+        v.widgets.active.bg_fill = Color32::from_rgb(66, 74, 96);
+        v.widgets.active.weak_bg_fill = Color32::from_rgb(62, 70, 90);
+        v.selection.bg_fill = Color32::from_rgb(52, 88, 140);
+        v.selection.stroke.color = accent;
+        v.hyperlink_color = accent;
+    } else {
+        let accent = Color32::from_rgb(50, 100, 180);
+        v.panel_fill = Color32::from_rgb(246, 246, 250);
+        v.window_fill = Color32::from_rgb(252, 252, 255);
+        v.selection.bg_fill = Color32::from_rgb(170, 200, 240);
+        v.selection.stroke.color = accent;
+        v.hyperlink_color = accent;
+    }
+    v
+}
+
+fn apply_theme(ctx: &egui::Context, dark: bool) {
+    ctx.set_visuals_of(egui::Theme::Dark, visuals(true));
+    ctx.set_visuals_of(egui::Theme::Light, visuals(false));
+    ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
 }

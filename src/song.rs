@@ -13,10 +13,15 @@ pub enum Style {
     Rainfall,
     CinematicSwell,
     NocturneDrift,
+    Tintinnabuli,
+    Chorale,
+    Canon,
+    TidalDrone,
+    FeltBallad,
 }
 
 impl Style {
-    pub const ALL: [Style; 7] = [
+    pub const ALL: [Style; 12] = [
         Style::EtherealPads,
         Style::Gymnopedie,
         Style::GenerativeLoops,
@@ -24,6 +29,11 @@ impl Style {
         Style::Rainfall,
         Style::CinematicSwell,
         Style::NocturneDrift,
+        Style::Tintinnabuli,
+        Style::Chorale,
+        Style::Canon,
+        Style::TidalDrone,
+        Style::FeltBallad,
     ];
 
     pub fn label(self) -> &'static str {
@@ -35,6 +45,11 @@ impl Style {
             Style::Rainfall => "Rainfall",
             Style::CinematicSwell => "Cinematic Swell",
             Style::NocturneDrift => "Nocturne Drift",
+            Style::Tintinnabuli => "Tintinnabuli",
+            Style::Chorale => "Hymn Chorale",
+            Style::Canon => "Canon on a Ground",
+            Style::TidalDrone => "Tidal Drone",
+            Style::FeltBallad => "Felt Ballad",
         }
     }
 
@@ -61,6 +76,21 @@ impl Style {
             Style::NocturneDrift => {
                 "A lyrical 6/8 nocturne: wide rolling left-hand arpeggios under a singing melody."
             }
+            Style::Tintinnabuli => {
+                "In the spirit of Arvo Pärt: a slow 6/4 melody circling one note, chiming triads, a mirrored bass."
+            }
+            Style::Chorale => {
+                "A slow four-part hymn: block chords with smooth voice leading, suspensions and breaths between phrases."
+            }
+            Style::Canon => {
+                "A Pachelbel-style repeating bass, with the melody taken up in turn by a second and third voice."
+            }
+            Style::TidalDrone => {
+                "A deep tonic drone under slow, wide chords that swell in waves, with high harmonics and distant bells."
+            }
+            Style::FeltBallad => {
+                "A late-night ballad: warm seventh and ninth chords, gently syncopated comping and a lightly swung tune."
+            }
         }
     }
 
@@ -73,6 +103,11 @@ impl Style {
             Style::Rainfall => 66.0,
             Style::CinematicSwell => 64.0,
             Style::NocturneDrift => 66.0,
+            Style::Tintinnabuli => 60.0,
+            Style::Chorale => 54.0,
+            Style::Canon => 58.0,
+            Style::TidalDrone => 52.0,
+            Style::FeltBallad => 66.0,
         }
     }
 
@@ -81,6 +116,7 @@ impl Style {
         match self {
             Style::Gymnopedie => (3, 4),
             Style::NocturneDrift => (6, 8),
+            Style::Tintinnabuli => (6, 4),
             _ => (4, 4),
         }
     }
@@ -143,6 +179,126 @@ pub struct Params {
     /// parts are note-for-note identical whether or not others are muted.
     #[serde(default)]
     pub muted: Vec<Inst>,
+    /// Parts played by a preset from a loaded SoundFont instead of their
+    /// General MIDI sound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fonts: Vec<(Inst, FontPreset)>,
+    /// Reverb space and tuning. These only change the sound, not the notes.
+    #[serde(default)]
+    pub fx: Fx,
+}
+
+/// The reverb's character.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Space {
+    Room,
+    Hall,
+    Cathedral,
+    Shimmer,
+    BlackHole,
+}
+
+impl Space {
+    pub const ALL: [Space; 5] = [Space::Room, Space::Hall, Space::Cathedral, Space::Shimmer, Space::BlackHole];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Space::Room => "Room",
+            Space::Hall => "Hall",
+            Space::Cathedral => "Cathedral",
+            Space::Shimmer => "Shimmer",
+            Space::BlackHole => "Black Hole",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Space::Room => "A small, close room with a short tail",
+            Space::Hall => "A concert hall, about three seconds long",
+            Space::Cathedral => "A large stone space with a long, dark tail",
+            Space::Shimmer => "A long hall whose tail rises an octave, like a halo of high strings",
+            Space::BlackHole => "Enormous, slowly swirling and almost endless: notes dissolve into a cloud",
+        }
+    }
+}
+
+/// Reference pitch for A above middle C.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tuning {
+    A440,
+    A432,
+    A415,
+}
+
+impl Tuning {
+    pub const ALL: [Tuning; 3] = [Tuning::A440, Tuning::A432, Tuning::A415];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tuning::A440 => "A = 440 Hz (standard)",
+            Tuning::A432 => "A = 432 Hz (warmer)",
+            Tuning::A415 => "A = 415 Hz (baroque)",
+        }
+    }
+
+    /// Offset from standard pitch in cents.
+    pub fn cents(self) -> f32 {
+        match self {
+            Tuning::A440 => 0.0,
+            Tuning::A432 => 1200.0 * (432f32 / 440.0).log2(),
+            Tuning::A415 => 1200.0 * (415f32 / 440.0).log2(),
+        }
+    }
+}
+
+/// Playback effects: the reverb space and tuning. All amounts are 0..1 with
+/// 0.5 as the space's natural setting.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Fx {
+    pub space: Space,
+    /// Reverb length: 0 = half, 1 = double the space's natural decay.
+    pub size: f32,
+    /// Reverb brightness: 0 = dark, 1 = bright.
+    pub tone: f32,
+    /// Reverb modulation: 0 = still, 1 = swirling.
+    pub motion: f32,
+    /// How far each part and note is pulled off pitch: 0 = in tune.
+    pub detune: f32,
+    /// Slow tape-like pitch wander: 0 = steady.
+    pub drift: f32,
+    pub tuning: Tuning,
+    /// Shimmer feedback: how much of the octave-up tail is fed back in.
+    pub shimmer: f32,
+    /// Detunes the shimmer feedback: 0 = a pure octave; higher splits it into
+    /// a sharp and a flat copy that beat against each other.
+    pub shimmer_detune: f32,
+}
+
+impl Default for Fx {
+    fn default() -> Self {
+        Fx {
+            space: Space::Hall,
+            size: 0.5,
+            tone: 0.5,
+            motion: 0.5,
+            detune: 0.0,
+            drift: 0.0,
+            tuning: Tuning::A440,
+            shimmer: 0.5,
+            shimmer_detune: 0.0,
+        }
+    }
+}
+
+/// A preset in a SoundFont, chosen for one part. The font is identified by its
+/// file name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FontPreset {
+    pub font: String,
+    pub bank: u8,
+    pub preset: u8,
+    pub name: String,
 }
 
 /// GM program per part.
@@ -263,6 +419,8 @@ impl Default for Params {
             reverb: 0.6,
             sounds: Sounds::default(),
             muted: Vec::new(),
+            fonts: Vec::new(),
+            fx: Fx::default(),
         }
     }
 }
@@ -291,6 +449,23 @@ impl Params {
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect::<String>()
             .replace("__", "_")
+    }
+
+    pub fn font(&self, inst: Inst) -> Option<&FontPreset> {
+        self.fonts.iter().find(|(i, _)| *i == inst).map(|(_, f)| f)
+    }
+
+    pub fn set_font(&mut self, inst: Inst, font: Option<FontPreset>) {
+        self.fonts.retain(|(i, _)| *i != inst);
+        if let Some(f) = font {
+            self.fonts.push((inst, f));
+            self.fonts.sort_by_key(|(i, _)| *i);
+        }
+    }
+
+    /// Whether two settings give the same notes (they may still sound different).
+    pub fn same_music(&self, other: &Params) -> bool {
+        Params { fx: other.fx, ..self.clone() } == *other
     }
 
     pub fn to_recipe(&self) -> String {
@@ -426,7 +601,32 @@ impl Song {
     }
 
     pub fn program(&self, inst: Inst) -> u8 {
-        self.params.sounds.get(inst)
+        match self.params.font(inst) {
+            Some(f) => f.preset,
+            None => self.params.sounds.get(inst),
+        }
+    }
+
+    /// Bank select (CC0) for the part: non-zero only for some SoundFont presets.
+    pub fn bank(&self, inst: Inst) -> u8 {
+        self.params.font(inst).map_or(0, |f| f.bank)
+    }
+
+    /// The name of the sound a part plays.
+    pub fn sound_name(&self, inst: Inst) -> String {
+        match self.params.font(inst) {
+            Some(f) => f.name.clone(),
+            None => sound_name(self.params.sounds.get(inst)),
+        }
+    }
+
+    /// Does the part's sound keep going while a key is held? For SoundFont
+    /// presets this isn't known, so it goes by the part's role.
+    pub fn sustains(&self, inst: Inst) -> bool {
+        match self.params.font(inst) {
+            Some(_) => inst.sustains(),
+            None => program_sustains(self.params.sounds.get(inst)),
+        }
     }
 
     /// Parts that actually sound (i.e. not muted).

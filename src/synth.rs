@@ -1,9 +1,12 @@
 //! Audio engines. `BuiltinSynth` is a small self-contained synthesiser (additive
-//! piano, bowed strings, plucks and a Freeverb-style reverb) so playback works out
+//! piano, bowed strings, plucks and a hall reverb) so playback works out
 //! of the box. `SoundFontSynth` wraps rustysynth for any General MIDI .sf2 file.
 
 use std::f32::consts::{PI, TAU};
 use std::sync::{Arc, OnceLock};
+
+use crate::reverb::Reverb;
+use crate::song::Fx;
 
 pub trait SynthEngine: Send {
     fn note_on(&mut self, ch: u8, key: u8, vel: u8);
@@ -13,6 +16,8 @@ pub trait SynthEngine: Send {
     /// Silence everything and reset controllers.
     fn reset(&mut self);
     fn render(&mut self, left: &mut [f32], right: &mut [f32]);
+    /// Change the reverb and tuning while playing.
+    fn set_fx(&mut self, _fx: &Fx) {}
 }
 
 // ------------------------------------------------------------------ helpers
@@ -35,6 +40,20 @@ fn fast_sin(table: &[f32], phase: f32) -> f32 {
 
 fn midi_hz(key: f32) -> f32 {
     440.0 * 2f32.powf((key - 69.0) / 12.0)
+}
+
+/// Pitch offset in cents for a channel at time `t`: the reference pitch, a
+/// fixed per-part detune, and slow drift (a shared tape-like wow plus a little
+/// wander of the part's own).
+pub fn channel_cents(fx: &Fx, ch: u8, t: f64) -> f32 {
+    let mut cents = fx.tuning.cents() + (hash01(ch as u32 * 7919 + 3) - 0.5) * 2.0 * fx.detune * 9.0;
+    if fx.drift > 0.0 {
+        let c = ch as f64;
+        let wow = (t * std::f64::consts::TAU * 0.23).sin() * 0.6 + (t * std::f64::consts::TAU * 0.071 + 1.3).sin() * 0.4;
+        let own = (t * std::f64::consts::TAU * (0.13 + 0.017 * c) + c * 2.1).sin();
+        cents += fx.drift * 16.0 * (wow * 0.7 + own * 0.3) as f32;
+    }
+    cents
 }
 
 /// Multiplier per sample that gives a 60 dB decay over `t60` seconds.
@@ -102,8 +121,8 @@ struct Struck {
 }
 
 impl Struck {
-    fn new(sr: f32, key: u8, vel: f32, tone: Tone, seed: u32) -> Self {
-        let f0 = midi_hz(key as f32);
+    fn new(sr: f32, key: u8, vel: f32, tone: Tone, seed: u32, cents: f32) -> Self {
+        let f0 = midi_hz(key as f32 + cents * 0.01);
         let k = key as f32;
         // (frequency, amplitude, t60) per partial
         let mut spec: Vec<(f32, f32, f32)> = Vec::new();
@@ -184,11 +203,11 @@ impl Struck {
     }
 
     #[inline]
-    fn next(&mut self, table: &[f32]) -> f32 {
+    fn next(&mut self, table: &[f32], ratio: f32) -> f32 {
         let mut s = 0.0;
         for p in self.partials.iter_mut() {
             s += fast_sin(table, p.phase) * p.amp;
-            p.phase += p.inc;
+            p.phase += p.inc * ratio;
             if p.phase >= 1.0 {
                 p.phase -= 1.0;
             }
@@ -254,13 +273,13 @@ struct Bowed {
 }
 
 impl Bowed {
-    fn new(sr: f32, key: u8, vel: f32, cfg: BowCfg, seed: u32) -> Self {
-        let f0 = midi_hz(key as f32);
+    fn new(sr: f32, key: u8, vel: f32, cfg: BowCfg, seed: u32, cents: f32, spread: f32) -> Self {
+        let f0 = midi_hz(key as f32 + cents * 0.01);
         let mut phases = [0.0; 3];
         let mut incs = [0.0; 3];
         for (i, d) in cfg.detunes.iter().take(3).enumerate() {
             phases[i] = hash01(seed + i as u32 * 17);
-            incs[i] = f0 * 2f32.powf(d / 1200.0) / sr;
+            incs[i] = f0 * 2f32.powf(d * spread / 1200.0) / sr;
         }
         // softer notes bow in more slowly
         let attack = cfg.attack * (1.0 - 0.45 * vel);
@@ -289,7 +308,7 @@ impl Bowed {
     }
 
     #[inline]
-    fn next(&mut self, table: &[f32]) -> f32 {
+    fn next(&mut self, table: &[f32], ratio: f32) -> f32 {
         let vib = fast_sin(table, self.vib_phase) * self.vib_depth * self.vib_onset;
         self.vib_phase += self.vib_inc;
         if self.vib_phase >= 1.0 {
@@ -298,7 +317,7 @@ impl Bowed {
         if self.vib_onset < 1.0 {
             self.vib_onset += self.vib_onset_inc;
         }
-        let ratio = 1.0 + vib * 0.000_577_8; // cents -> ratio (approx)
+        let ratio = ratio * (1.0 + vib * 0.000_577_8); // cents -> ratio (approx)
         let mut s = 0.0;
         for i in 0..self.n {
             let dt = self.incs[i] * ratio;
@@ -388,8 +407,8 @@ struct Wind {
 }
 
 impl Wind {
-    fn new(sr: f32, key: u8, vel: f32, cfg: WindCfg, seed: u32) -> Self {
-        let f0 = midi_hz(key as f32);
+    fn new(sr: f32, key: u8, vel: f32, cfg: WindCfg, seed: u32, cents: f32) -> Self {
+        let f0 = midi_hz(key as f32 + cents * 0.01);
         let mut amps = [0.0; 12];
         let mut n = 0;
         for (h, a) in cfg.harmonics.iter().enumerate().take(12) {
@@ -424,7 +443,7 @@ impl Wind {
     }
 
     #[inline]
-    fn next(&mut self, table: &[f32]) -> f32 {
+    fn next(&mut self, table: &[f32], ratio: f32) -> f32 {
         let vib = fast_sin(table, self.vib_phase) * self.vib_depth * self.vib_onset;
         self.vib_phase += self.vib_inc;
         if self.vib_phase >= 1.0 {
@@ -438,7 +457,7 @@ impl Wind {
             let ph = self.phase * (h + 1) as f32;
             s += fast_sin(table, ph - ph.floor()) * self.amps[h];
         }
-        self.phase += self.inc * (1.0 + vib * 0.000_577_8);
+        self.phase += self.inc * ratio * (1.0 + vib * 0.000_577_8);
         if self.phase >= 1.0 {
             self.phase -= 1.0;
         }
@@ -511,83 +530,6 @@ impl Default for Channel {
     }
 }
 
-// ------------------------------------------------------------------ reverb
-
-struct Comb {
-    buf: Vec<f32>,
-    idx: usize,
-    store: f32,
-}
-struct Allpass {
-    buf: Vec<f32>,
-    idx: usize,
-}
-
-struct Reverb {
-    combs: [Vec<Comb>; 2],
-    allpasses: [Vec<Allpass>; 2],
-    feedback: f32,
-    damp: f32,
-    predelay: Vec<f32>,
-    pd_idx: usize,
-}
-
-impl Reverb {
-    fn new(sr: f32) -> Self {
-        const COMBS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
-        const APS: [usize; 4] = [556, 441, 341, 225];
-        let scale = sr / 44100.0 * 1.25; // a slightly larger room than stock Freeverb
-        let mk = |spread: usize| {
-            (
-                COMBS
-                    .iter()
-                    .map(|l| Comb { buf: vec![0.0; ((l + spread) as f32 * scale) as usize], idx: 0, store: 0.0 })
-                    .collect::<Vec<_>>(),
-                APS.iter()
-                    .map(|l| Allpass { buf: vec![0.0; ((l + spread) as f32 * scale) as usize], idx: 0 })
-                    .collect::<Vec<_>>(),
-            )
-        };
-        let (cl, al) = mk(0);
-        let (cr, ar) = mk(23);
-        Reverb {
-            combs: [cl, cr],
-            allpasses: [al, ar],
-            feedback: 0.86,
-            damp: 0.3,
-            predelay: vec![0.0; (0.025 * sr) as usize],
-            pd_idx: 0,
-        }
-    }
-
-    #[inline]
-    fn process(&mut self, input: f32) -> (f32, f32) {
-        let x = self.predelay[self.pd_idx];
-        self.predelay[self.pd_idx] = input;
-        self.pd_idx = (self.pd_idx + 1) % self.predelay.len();
-        let x = x * 0.015;
-        let mut out = [0.0f32; 2];
-        for side in 0..2 {
-            let mut acc = 0.0;
-            for c in self.combs[side].iter_mut() {
-                let y = c.buf[c.idx];
-                c.store = y * (1.0 - self.damp) + c.store * self.damp;
-                c.buf[c.idx] = x + c.store * self.feedback;
-                c.idx = (c.idx + 1) % c.buf.len();
-                acc += y;
-            }
-            for a in self.allpasses[side].iter_mut() {
-                let b = a.buf[a.idx];
-                a.buf[a.idx] = acc + b * 0.5;
-                a.idx = (a.idx + 1) % a.buf.len();
-                acc = b - acc;
-            }
-            out[side] = acc;
-        }
-        (out[0], out[1])
-    }
-}
-
 // ------------------------------------------------------------------ synth
 
 pub struct BuiltinSynth {
@@ -597,10 +539,19 @@ pub struct BuiltinSynth {
     reverb: Reverb,
     counter: u64,
     expr_coef: f32,
+    fx: Fx,
+    /// Samples rendered, for the drift.
+    clock: u64,
 }
 
 const MAX_VOICES: usize = 72;
 const MASTER: f32 = 3.4;
+/// Reverb level for both engines.
+const WET: f32 = 2.0;
+/// Pitch drift is updated this often (samples).
+const DRIFT_BLOCK: usize = 32;
+/// SoundFont presets are brighter and fuller, so they need less.
+const SF_WET: f32 = 1.2;
 
 impl BuiltinSynth {
     pub fn new(sample_rate: u32) -> Self {
@@ -610,9 +561,11 @@ impl BuiltinSynth {
             sr,
             voices: Vec::with_capacity(MAX_VOICES),
             channels: [Channel::default(); 16],
-            reverb: Reverb::new(sr),
+            reverb: Reverb::new(sr, &Fx::default()),
             counter: 0,
             expr_coef: 1.0 - (-1.0 / (0.05 * sr)).exp(),
+            fx: Fx::default(),
+            clock: 0,
         }
     }
 }
@@ -647,9 +600,12 @@ impl SynthEngine for BuiltinSynth {
         let v = vel as f32 / 127.0;
         let program = self.channels[ch as usize].program;
         let (sr, v) = (self.sr, v);
-        let struck = |t: Tone, g: f32| (VoiceKind::Struck(Struck::new(sr, key, v, t, seed)), g);
-        let bowed = |c: BowCfg, g: f32| (VoiceKind::Bowed(Bowed::new(sr, key, v, c, seed)), g);
-        let wind = |c: WindCfg, g: f32| (VoiceKind::Wind(Wind::new(sr, key, v, c, seed)), g);
+        // each note lands a little off pitch, and ensemble sounds spread wider
+        let cents = (hash01(seed ^ 0x5bd1) - 0.5) * 2.0 * self.fx.detune * 6.0;
+        let spread = 1.0 + self.fx.detune * 1.5;
+        let struck = |t: Tone, g: f32| (VoiceKind::Struck(Struck::new(sr, key, v, t, seed, cents)), g);
+        let bowed = |c: BowCfg, g: f32| (VoiceKind::Bowed(Bowed::new(sr, key, v, c, seed, cents, spread)), g);
+        let wind = |c: WindCfg, g: f32| (VoiceKind::Wind(Wind::new(sr, key, v, c, seed, cents)), g);
         let (kind, gain) = match program {
             0..=3 => struck(Tone::Piano, 0.55),
             4..=7 => struck(Tone::EPiano, 0.33),
@@ -725,6 +681,7 @@ impl SynthEngine for BuiltinSynth {
             *c = Channel::default();
             c.program = program;
         }
+        self.reverb.clear();
     }
 
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
@@ -733,28 +690,43 @@ impl SynthEngine for BuiltinSynth {
             // expression smoothing at block rate is plenty
             c.expr += (c.expr_target - c.expr) * (self.expr_coef * left.len() as f32).min(1.0);
         }
+        let mut ratios = [1.0f32; 16];
         for i in 0..left.len() {
+            if self.clock % DRIFT_BLOCK as u64 == 0 {
+                let t = self.clock as f64 / self.sr as f64;
+                for (ch, r) in ratios.iter_mut().enumerate() {
+                    *r = 2f32.powf(channel_cents(&self.fx, ch as u8, t) / 1200.0);
+                }
+            }
+            self.clock += 1;
             let mut l = 0.0;
             let mut r = 0.0;
-            let mut send = 0.0;
+            let (mut sl, mut sr) = (0.0, 0.0);
             for v in self.voices.iter_mut() {
                 let ch = &self.channels[v.ch as usize];
+                let ratio = ratios[v.ch as usize];
                 let s = match &mut v.kind {
-                    VoiceKind::Struck(x) => x.next(table),
-                    VoiceKind::Bowed(x) => x.next(table),
-                    VoiceKind::Wind(x) => x.next(table),
+                    VoiceKind::Struck(x) => x.next(table, ratio),
+                    VoiceKind::Bowed(x) => x.next(table, ratio),
+                    VoiceKind::Wind(x) => x.next(table, ratio),
                 } * v.gain
                     * ch.volume
                     * ch.expr;
                 l += s * v.pan_l;
                 r += s * v.pan_r;
-                send += s * ch.send;
+                sl += s * v.pan_l * ch.send;
+                sr += s * v.pan_r * ch.send;
             }
-            let (wl, wr) = self.reverb.process(send);
-            left[i] = soft_clip((l + wl * 2.2) * MASTER);
-            right[i] = soft_clip((r + wr * 2.2) * MASTER);
+            let (wl, wr) = self.reverb.process(sl, sr);
+            left[i] = soft_clip((l + wl * WET) * MASTER);
+            right[i] = soft_clip((r + wr * WET) * MASTER);
         }
         self.voices.retain(|v| !(v.released || matches!(v.kind, VoiceKind::Struck(_))) || v.level() > 2e-4);
+    }
+
+    fn set_fx(&mut self, fx: &Fx) {
+        self.fx = *fx;
+        self.reverb.set(fx);
     }
 }
 
@@ -765,17 +737,52 @@ fn soft_clip(x: f32) -> f32 {
 
 // --------------------------------------------------------------- soundfont
 
+/// A SoundFont player. Its own (Freeverb) reverb is switched off and the
+/// shared hall reverb used instead, driven by the channels' reverb sends.
 pub struct SoundFontSynth {
     synth: rustysynth::Synthesizer,
+    reverb: Reverb,
+    sends: [f32; 16],
+    fx: Fx,
+    sr: f32,
+    clock: u64,
+    /// Pitch bend last sent to each channel.
+    bends: [u16; 16],
 }
+
+/// Pitch bend range in semitones, GM's default.
+const BEND_RANGE: f32 = 2.0;
 
 impl SoundFontSynth {
     pub fn new(font: &Arc<rustysynth::SoundFont>, sample_rate: u32) -> Result<Self, String> {
-        let settings = rustysynth::SynthesizerSettings::new(sample_rate as i32);
+        let mut settings = rustysynth::SynthesizerSettings::new(sample_rate as i32);
+        settings.enable_reverb_and_chorus = false;
         let mut synth = rustysynth::Synthesizer::new(font, &settings).map_err(|e| format!("{e:?}"))?;
         // The generator uses soft velocities; bring SoundFonts up to a similar level as the built-in synth.
         synth.set_master_volume(3.5);
-        Ok(Self { synth })
+        let sr = sample_rate as f32;
+        Ok(Self {
+            synth,
+            reverb: Reverb::new(sr, &Fx::default()),
+            sends: [0.4; 16],
+            fx: Fx::default(),
+            sr,
+            clock: 0,
+            bends: [8192; 16],
+        })
+    }
+
+    /// Bend every channel to its tuning, detune and drift.
+    fn retune(&mut self) {
+        let t = self.clock as f64 / self.sr as f64;
+        for ch in 0..16u8 {
+            let cents = channel_cents(&self.fx, ch, t);
+            let bend = (8192.0 + cents / (BEND_RANGE * 100.0) * 8192.0).round().clamp(0.0, 16383.0) as u16;
+            if bend != self.bends[ch as usize] {
+                self.bends[ch as usize] = bend;
+                self.synth.process_midi_message(ch as i32, 0xE0, (bend & 0x7f) as i32, (bend >> 7) as i32);
+            }
+        }
     }
 }
 
@@ -787,6 +794,9 @@ impl SynthEngine for SoundFontSynth {
         self.synth.note_off(ch as i32, key as i32);
     }
     fn control(&mut self, ch: u8, cc: u8, value: u8) {
+        if cc == 91 {
+            self.sends[(ch & 15) as usize] = value as f32 / 127.0;
+        }
         self.synth.process_midi_message(ch as i32, 0xB0, cc as i32, value as i32);
     }
     fn program(&mut self, ch: u8, program: u8) {
@@ -795,9 +805,100 @@ impl SynthEngine for SoundFontSynth {
     fn reset(&mut self) {
         self.synth.note_off_all(true);
         self.synth.reset_all_controllers();
+        self.reverb.clear();
+        self.sends = [0.4; 16];
+        // controllers were reset, so the bends must be sent again
+        self.bends = [8192; 16];
     }
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
-        self.synth.render(left, right);
+        // render in short pieces so the drift moves smoothly
+        let mut off = 0;
+        while off < left.len() {
+            let len = (DRIFT_BLOCK * 2).min(left.len() - off);
+            self.retune();
+            self.synth.render(&mut left[off..off + len], &mut right[off..off + len]);
+            self.clock += len as u64;
+            off += len;
+        }
+        // The mix arrives already summed, so one send level (the highest) is used.
+        let send = self.sends.iter().fold(0.0f32, |m, s| m.max(*s));
+        for i in 0..left.len() {
+            let (wl, wr) = self.reverb.process(left[i] * send, right[i] * send);
+            left[i] = soft_clip(left[i] + wl * SF_WET);
+            right[i] = soft_clip(right[i] + wr * SF_WET);
+        }
+    }
+    fn set_fx(&mut self, fx: &Fx) {
+        self.fx = *fx;
+        self.reverb.set(fx);
+    }
+}
+
+// ------------------------------------------------------------------- mixer
+
+/// Sends each MIDI channel to one of several engines and mixes their output.
+/// Engine 0 is the main engine; the others are SoundFonts chosen for single parts.
+pub struct MixSynth {
+    engines: Vec<Box<dyn SynthEngine>>,
+    route: [usize; 16],
+    tmp_l: Vec<f32>,
+    tmp_r: Vec<f32>,
+}
+
+impl MixSynth {
+    pub fn new(main: Box<dyn SynthEngine>) -> Self {
+        MixSynth { engines: vec![main], route: [0; 16], tmp_l: Vec::new(), tmp_r: Vec::new() }
+    }
+
+    /// Add an engine and return its index, for `route`.
+    pub fn add(&mut self, engine: Box<dyn SynthEngine>) -> usize {
+        self.engines.push(engine);
+        self.engines.len() - 1
+    }
+
+    pub fn route(&mut self, ch: u8, engine: usize) {
+        self.route[(ch & 15) as usize] = engine.min(self.engines.len() - 1);
+    }
+
+    fn engine(&mut self, ch: u8) -> &mut Box<dyn SynthEngine> {
+        &mut self.engines[self.route[(ch & 15) as usize]]
+    }
+}
+
+impl SynthEngine for MixSynth {
+    fn note_on(&mut self, ch: u8, key: u8, vel: u8) {
+        self.engine(ch).note_on(ch, key, vel);
+    }
+    fn note_off(&mut self, ch: u8, key: u8) {
+        self.engine(ch).note_off(ch, key);
+    }
+    fn control(&mut self, ch: u8, cc: u8, value: u8) {
+        self.engine(ch).control(ch, cc, value);
+    }
+    fn program(&mut self, ch: u8, program: u8) {
+        self.engine(ch).program(ch, program);
+    }
+    fn reset(&mut self) {
+        self.engines.iter_mut().for_each(|e| e.reset());
+    }
+    fn set_fx(&mut self, fx: &Fx) {
+        self.engines.iter_mut().for_each(|e| e.set_fx(fx));
+    }
+    fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
+        let (first, rest) = self.engines.split_first_mut().expect("main engine");
+        first.render(left, right);
+        if rest.is_empty() {
+            return;
+        }
+        self.tmp_l.resize(left.len(), 0.0);
+        self.tmp_r.resize(left.len(), 0.0);
+        for e in rest {
+            e.render(&mut self.tmp_l, &mut self.tmp_r);
+            for i in 0..left.len() {
+                left[i] += self.tmp_l[i];
+                right[i] += self.tmp_r[i];
+            }
+        }
         for x in left.iter_mut().chain(right.iter_mut()) {
             *x = soft_clip(*x);
         }
@@ -837,5 +938,62 @@ mod tests {
             println!("{:<18} peaks {:.2} {:.2} {:.2}", snd.name, peaks[0], peaks[1], peaks[2]);
             assert!(peaks.iter().all(|p| *p > 0.03 && *p < 0.95), "{} level out of range: {peaks:?}", snd.name);
         }
+    }
+
+    /// Records which engine each event reached.
+    struct Probe(std::sync::Arc<std::sync::Mutex<Vec<(u8, u8)>>>, u8);
+
+    impl SynthEngine for Probe {
+        fn note_on(&mut self, ch: u8, _: u8, _: u8) {
+            self.0.lock().unwrap().push((self.1, ch));
+        }
+        fn note_off(&mut self, _: u8, _: u8) {}
+        fn control(&mut self, _: u8, _: u8, _: u8) {}
+        fn program(&mut self, _: u8, _: u8) {}
+        fn reset(&mut self) {}
+        fn render(&mut self, l: &mut [f32], r: &mut [f32]) {
+            l.fill(0.25);
+            r.fill(0.25);
+        }
+    }
+
+    #[test]
+    fn mix_routes_channels_and_sums() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut mix = MixSynth::new(Box::new(Probe(log.clone(), 0)));
+        let second = mix.add(Box::new(Probe(log.clone(), 1)));
+        mix.route(2, second);
+        for ch in 0..4 {
+            mix.note_on(ch, 60, 90);
+        }
+        assert_eq!(*log.lock().unwrap(), vec![(0, 0), (0, 1), (1, 2), (0, 3)]);
+        let (mut l, mut r) = (vec![0.0; 8], vec![0.0; 8]);
+        mix.render(&mut l, &mut r);
+        assert!((l[0] - 0.5).abs() < 1e-6 && (r[7] - 0.5).abs() < 1e-6);
+    }
+
+    /// Tuning moves the pitch, and detune and drift keep it near the note.
+    #[test]
+    fn tuning_and_detune_shift_pitch() {
+        use crate::song::Tuning;
+        let sr = 44100;
+        let pitch = |fx: Fx| {
+            let mut s = BuiltinSynth::new(sr);
+            s.set_fx(&fx);
+            s.program(0, 73); // flute: nearly a pure tone
+            s.control(0, 91, 0);
+            s.note_on(0, 69, 100);
+            let (mut l, mut r) = (vec![0.0f32; sr as usize], vec![0.0f32; sr as usize]);
+            s.render(&mut l, &mut r);
+            // count rising zero crossings in the second half second
+            let x = &l[sr as usize / 2..];
+            x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f32 * 2.0
+        };
+        let a440 = pitch(Fx::default());
+        let a432 = pitch(Fx { tuning: Tuning::A432, ..Fx::default() });
+        let loose = pitch(Fx { detune: 1.0, drift: 1.0, ..Fx::default() });
+        println!("A440 {a440} Hz, A432 {a432} Hz, detuned and drifting {loose} Hz");
+        assert!((a440 - 440.0).abs() <= 4.0 && (a432 - 432.0).abs() <= 4.0);
+        assert!((loose - 440.0).abs() <= 15.0);
     }
 }
