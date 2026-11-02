@@ -12,10 +12,14 @@ mod player;
 mod project;
 mod reverb;
 mod rng;
+mod slideshow;
+mod snapshot;
 mod song;
 mod synth;
+mod theme;
 mod theory;
 mod update;
+mod widgets;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -29,8 +33,15 @@ fn main() -> eframe::Result {
             ),
         ..Default::default()
     };
+    // Automated screenshots keep their own settings, so they start from defaults
+    // and never touch the user's.
+    let app_name = if snapshot::Snapshot::from_env().is_some() {
+        "Ambient MIDI Generator (screenshot)"
+    } else {
+        "Ambient MIDI Generator"
+    };
     eframe::run_native(
-        "Ambient MIDI Generator",
+        app_name,
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )

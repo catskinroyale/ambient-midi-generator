@@ -9,8 +9,11 @@ use crate::update::{self, UpdateStatus};
 
 const APP_LICENCE: &str = include_str!("../LICENSE");
 const SOUNDFONT_LICENCE: &str = include_str!("../soundfonts/GeneralUser-GS-LICENSE.txt");
+const ELECTRONIC_LICENCE: &str = include_str!("../soundfonts/Ambient-Electronic-LICENSE.txt");
 const LICENCES_JSON: &str = include_str!("../assets/licences.json");
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
+const LIGHTCRAFT_TEXT: &str = include_str!("../assets/LICENSE-LightCraft-MIT");
+const INTER_TEXT: &str = include_str!("../assets/fonts/OFL-Inter.txt");
 
 /// Short git commit hash of this build, or "unknown" outside a git checkout.
 pub const COMMIT: &str = env!("MIDIGEN_GIT_COMMIT");
@@ -57,7 +60,7 @@ fn licence_summary() -> Vec<(String, usize)> {
 
 fn licence_text(ui: &mut egui::Ui, id: &str, title: &str, text: &str) {
     egui::CollapsingHeader::new(title).id_salt(id).show(ui, |ui| {
-        egui::ScrollArea::vertical().id_salt(id).max_height(180.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt(id).min_scrolled_height(180.0).max_height(180.0).show(ui, |ui| {
             ui.label(egui::RichText::new(text).monospace().small());
         });
     });
@@ -70,7 +73,9 @@ pub struct About {
     pub check_requested: bool,
     filter: String,
     /// The crate whose licence is shown under the list.
-    selected: Option<usize>,
+    pub selected: Option<usize>,
+    /// Scroll to this offset on the next frame (used by automated screenshots).
+    pub scroll_to: Option<f32>,
     icon: Option<egui::TextureHandle>,
 }
 
@@ -91,17 +96,18 @@ impl About {
         }
         let icon = self.icon(ctx);
         let mut open = self.open;
+        let h = (ctx.content_rect().height() - 140.0).clamp(240.0, 680.0);
         egui::Window::new("About Ambient MIDI Generator")
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
+            .fixed_size(egui::vec2(560.0, h))
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.set_width(540.0);
-                egui::ScrollArea::vertical().id_salt("about").max_height(ctx.content_rect().height() - 120.0).show(
-                    ui,
-                    |ui| self.contents(ui, icon.as_ref(), update, check_at_startup),
-                );
+                let mut area = egui::ScrollArea::vertical().id_salt("about").auto_shrink([false, false]);
+                if let Some(y) = self.scroll_to.take() {
+                    area = area.vertical_scroll_offset(y);
+                }
+                area.show(ui, |ui| self.contents(ui, icon.as_ref(), update, check_at_startup));
             });
         self.open = open;
     }
@@ -113,6 +119,7 @@ impl About {
         update: &Option<UpdateStatus>,
         check_at_startup: &mut bool,
     ) {
+        ui.set_max_width(544.0);
         ui.horizontal(|ui| {
             if let Some(icon) = icon {
                 ui.add(egui::Image::new(icon).fit_to_exact_size(egui::vec2(72.0, 72.0)));
@@ -166,20 +173,29 @@ impl About {
             ui.label("GeneralUser GS SoundFont (bundled)");
             ui.label("GeneralUser GS License v2.0");
             ui.end_row();
+            ui.label("Ambient Electronic SoundFont (bundled)");
+            ui.label("MIT");
+            ui.end_row();
         });
         licence_text(ui, "app-mit", "MIT License — full text", APP_LICENCE);
         licence_text(ui, "generaluser", "GeneralUser GS License — full text", SOUNDFONT_LICENCE);
+        licence_text(ui, "electronic", "Ambient Electronic SoundFont — MIT License", ELECTRONIC_LICENCE);
+        licence_text(ui, "lightcraft", "LightCraft (interface design) — MIT License", LIGHTCRAFT_TEXT);
+        licence_text(ui, "inter", "Inter typeface — SIL Open Font License 1.1", INTER_TEXT);
 
         ui.separator();
         ui.label(egui::RichText::new("Data and components").strong());
         for (what, source) in [
             ("Bundled SoundFont", "GeneralUser GS, S. Christian Collins — GeneralUser GS License v2.0"),
+            ("Electronic SoundFont", "Ambient Electronic, synthesised by this project (examples/make_soundfont.rs) — MIT"),
             ("SoundFont playback", "rustysynth, Nobuaki Tanaka — MIT"),
             ("Audio output", "cpal, RustAudio — Apache-2.0"),
             ("MIDI files", "midly — Unlicense"),
             ("WAV export", "hound — Apache-2.0"),
             ("Interface", "egui and eframe, Emil Ernerfeldt — MIT OR Apache-2.0"),
-            ("Interface fonts", "egui default fonts — Ubuntu Font Licence, SIL OFL 1.1"),
+            ("Interface design", "Adapted from BW Darkroom and LightCraft, ArtCraft Team and LightCraft contributors — MIT"),
+            ("Interface font", "Inter, Rasmus Andersson — SIL OFL 1.1"),
+            ("Fallback fonts", "egui default fonts — Ubuntu Font Licence, SIL OFL 1.1"),
             ("Update check", "ureq — MIT OR Apache-2.0; asks api.github.com only"),
             ("Music, synth and reverb", "this project — MIT"),
         ] {
@@ -193,10 +209,9 @@ impl About {
         let lic = licences();
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(format!("Third-party components ({})", lic.crates.len())).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(140.0))
-                    .on_hover_text("Filter by crate name or licence");
-            });
+            ui.add_space(12.0);
+            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(160.0))
+                .on_hover_text("Filter by crate name or licence");
         });
         let summary = licence_summary()
             .into_iter()
@@ -207,21 +222,37 @@ impl About {
         ui.label(egui::RichText::new(summary).small().weak());
         ui.label(egui::RichText::new("Click a component to read its licence.").small().weak());
         let needle = self.filter.to_lowercase();
-        egui::ScrollArea::vertical().id_salt("components").max_height(220.0).show(ui, |ui| {
-            egui::Grid::new("components").num_columns(3).striped(true).spacing([12.0, 2.0]).show(ui, |ui| {
-                for (i, (name, version, expr, url, _)) in lic.crates.iter().enumerate() {
-                    if !needle.is_empty() && !name.to_lowercase().contains(&needle) && !expr.to_lowercase().contains(&needle) {
-                        continue;
-                    }
-                    let on = self.selected == Some(i);
-                    if ui.selectable_label(on, name).on_hover_text(url).clicked() {
-                        self.selected = if on { None } else { Some(i) };
-                    }
-                    ui.label(egui::RichText::new(version).weak());
-                    ui.label(expr);
-                    ui.end_row();
-                }
+        // Fixed-width columns, so a long name or licence is shortened instead of
+        // widening the window; hovering shows it in full.
+        let stripe = ui.visuals().faint_bg_color;
+        egui::ScrollArea::vertical().id_salt("components").min_scrolled_height(220.0).max_height(220.0).show(ui, |ui| {
+            let w = ui.available_width();
+            let shown = lic.crates.iter().enumerate().filter(|(_, (name, _, expr, _, _))| {
+                needle.is_empty() || name.to_lowercase().contains(&needle) || expr.to_lowercase().contains(&needle)
             });
+            for (row, (i, (name, version, expr, url, _))) in shown.enumerate() {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::hover());
+                if row % 2 == 1 {
+                    ui.painter().rect_filled(rect, 0.0, stripe);
+                }
+                let mut cell = |x: f32, width: f32| {
+                    ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(egui::Rect::from_min_size(rect.min + egui::vec2(x, 0.0), egui::vec2(width, 20.0)))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    )
+                };
+                let on = self.selected == Some(i);
+                if cell(4.0, 196.0)
+                    .add(egui::Button::selectable(on, name.as_str()).truncate())
+                    .on_hover_text(format!("{name}\n{url}"))
+                    .clicked()
+                {
+                    self.selected = if on { None } else { Some(i) };
+                }
+                cell(206.0, 70.0).add(egui::Label::new(egui::RichText::new(version).weak()).truncate());
+                cell(280.0, (w - 284.0).max(40.0)).add(egui::Label::new(expr.as_str()).truncate()).on_hover_text(expr);
+            }
         });
         if let Some((name, version, expr, url, own)) = self.selected.and_then(|i| lic.crates.get(i)) {
             ui.add_space(4.0);
@@ -235,7 +266,7 @@ impl About {
             } else {
                 own.iter().filter_map(|i| lic.texts.get(*i)).map(|t| t.as_str()).collect()
             };
-            egui::ScrollArea::vertical().id_salt("component-licence").max_height(200.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("component-licence").min_scrolled_height(200.0).max_height(200.0).show(ui, |ui| {
                 ui.label(egui::RichText::new(texts.join("\n\n────────\n\n")).monospace().small());
             });
         }
@@ -296,6 +327,9 @@ mod tests {
     fn licence_texts_are_bundled() {
         assert!(APP_LICENCE.starts_with("MIT License"));
         assert!(SOUNDFONT_LICENCE.contains("GeneralUser GS"));
+        assert!(ELECTRONIC_LICENCE.contains("MIT License"));
+        assert!(LIGHTCRAFT_TEXT.contains("LightCraft contributors"));
+        assert!(INTER_TEXT.contains("SIL OPEN FONT LICENSE"));
         assert!(licences().spdx.get("Apache-2.0").is_some_and(|t| t.contains("Apache License")));
         assert!(eframe::icon_data::from_png_bytes(ICON_PNG).is_ok());
         assert!(!COMMIT.is_empty());

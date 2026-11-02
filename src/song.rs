@@ -18,10 +18,14 @@ pub enum Style {
     Canon,
     TidalDrone,
     FeltBallad,
+    BerlinSchool,
+    DubChords,
+    Aurora,
+    Lullaby,
 }
 
 impl Style {
-    pub const ALL: [Style; 12] = [
+    pub const ALL: [Style; 16] = [
         Style::EtherealPads,
         Style::Gymnopedie,
         Style::GenerativeLoops,
@@ -34,6 +38,10 @@ impl Style {
         Style::Canon,
         Style::TidalDrone,
         Style::FeltBallad,
+        Style::BerlinSchool,
+        Style::DubChords,
+        Style::Aurora,
+        Style::Lullaby,
     ];
 
     pub fn label(self) -> &'static str {
@@ -50,6 +58,10 @@ impl Style {
             Style::Canon => "Canon on a Ground",
             Style::TidalDrone => "Tidal Drone",
             Style::FeltBallad => "Felt Ballad",
+            Style::BerlinSchool => "Berlin School",
+            Style::DubChords => "Dub Chords",
+            Style::Aurora => "Aurora",
+            Style::Lullaby => "Music Box Lullaby",
         }
     }
 
@@ -91,6 +103,18 @@ impl Style {
             Style::FeltBallad => {
                 "A late-night ballad: warm seventh and ninth chords, gently syncopated comping and a lightly swung tune."
             }
+            Style::BerlinSchool => {
+                "Electronic, in the spirit of Tangerine Dream: a pulsing sequencer pattern over a pedal bass, warm pads and a slow lead."
+            }
+            Style::DubChords => {
+                "Electronic dub: offbeat seventh-chord stabs echoing away into the distance, over a deep sub bass and a sweeping pad."
+            }
+            Style::Aurora => {
+                "Electronic: glowing chord clusters that bloom note by note and fade together, a choir above and crystal bells."
+            }
+            Style::Lullaby => {
+                "A gentle 3/4 lullaby on a music box, over a rocking harp or piano and soft strings."
+            }
         }
     }
 
@@ -108,6 +132,10 @@ impl Style {
             Style::Canon => 58.0,
             Style::TidalDrone => 52.0,
             Style::FeltBallad => 66.0,
+            Style::BerlinSchool => 84.0,
+            Style::DubChords => 68.0,
+            Style::Aurora => 48.0,
+            Style::Lullaby => 66.0,
         }
     }
 
@@ -117,10 +145,41 @@ impl Style {
             Style::Gymnopedie => (3, 4),
             Style::NocturneDrift => (6, 8),
             Style::Tintinnabuli => (6, 4),
+            Style::Lullaby => (3, 4),
             _ => (4, 4),
         }
     }
+
+    /// The sounds this style is written for, if they differ from the defaults.
+    pub fn suggested_sounds(self) -> Option<SuggestedSounds> {
+        let electronic = |keys, pad, lead, bass, pluck| SuggestedSounds {
+            sounds: Sounds { keys, pad, lead, bass, pluck },
+            electronic: true,
+        };
+        match self {
+            // Sub bass, analogue pluck and saw lead, warm or sweeping pads, crystal bells
+            Style::BerlinSchool => Some(electronic(98, 88, 81, 38, 45)),
+            Style::DubChords => Some(electronic(4, 95, 89, 38, 45)),
+            Style::Aurora => Some(electronic(98, 94, 91, 88, 0)),
+            // music box, harp, slow strings, flute, cello
+            Style::Lullaby => Some(SuggestedSounds {
+                sounds: Sounds { keys: 10, pad: 49, lead: 73, bass: 42, pluck: 46 },
+                electronic: false,
+            }),
+            _ => None,
+        }
+    }
 }
+
+/// A style's sounds: General MIDI programs, and whether the parts should play the
+/// bundled Ambient Electronic SoundFont (whose presets sit at those programs).
+pub struct SuggestedSounds {
+    pub sounds: Sounds,
+    pub electronic: bool,
+}
+
+/// The SoundFont synthesised for the electronic styles, shipped with the app.
+pub const ELECTRONIC_FONT: &str = "Ambient-Electronic.sf2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Instrumentation {
@@ -379,6 +438,9 @@ pub const SOUNDS: &[Sound] = &[
     snd(91, "Choir Pad", "Voices & pads"),
     snd(94, "Halo Pad", "Voices & pads"),
     snd(95, "Sweep Pad", "Voices & pads"),
+    snd(38, "Synth Bass", "Synth"),
+    snd(81, "Saw Lead", "Synth"),
+    snd(98, "Crystal", "Synth"),
     snd(73, "Flute", "Winds"),
     snd(75, "Pan Flute", "Winds"),
     snd(71, "Clarinet", "Winds"),

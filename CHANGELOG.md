@@ -5,6 +5,23 @@ All notable changes to this project are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
+### Added
+- Four new styles (sixteen in all): Berlin School, Dub Chords and Aurora (electronic), and Music Box Lullaby. Choosing one sets the parts to the sounds it is written for.
+- The Ambient Electronic SoundFont, bundled: 12 synthesiser presets (keys, FM electric piano, sub bass, pluck, supersaw strings, saw lead, warm, glass, halo and sweep pads, airy choir, crystal bells), synthesised from code by `examples/make_soundfont.rs` and released under the MIT License.
+- Synth Bass, Saw Lead and Crystal sounds for the built-in synth.
+- Slideshow planning: count the images (4 to 8 seconds each, crossfade included) that a track holds after an intro and before an outro, or set the track's length for a number of images. Images change on bars, half bars or beats. Copy or save a CSV cue list, and see the image changes on the piano roll.
+- `MIDIGEN_SCREENSHOT` for automated UI checks: the app saves a picture of its window and quits.
+
+### Changed
+- A new look following BW Darkroom and LightCraft: Charcoal and Silver themes, the Inter typeface, slider rows with the value beside the label and less/more words under the track (double-click to reset, click the value to type, Shift for fine control), segmented buttons, accordion sections, a top bar and a transport toolbar with line icons.
+- The theme button steps through Auto, Light and Dark; the control panel can be hidden.
+- Every bundled SoundFont is loaded at startup; the General MIDI one is the main sound.
+
+### Fixed
+- Opening Sound Fonts no longer adds a screenful of empty space under each SoundFont, which pushed Recipe off the screen.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added
@@ -29,6 +46,7 @@ All notable changes to this project are documented here. The project uses
 
 First release: seven ambient styles, seeded and repeatable generation, a built-in synth, GeneralUser GS SoundFont playback, MIDI and WAV export, and per-part switches and sounds.
 
-[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/catskinroyale/ambient-midi-generator/releases/tag/v0.1.0

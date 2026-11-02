@@ -248,6 +248,7 @@ const CELLO: BowCfg = BowCfg { detunes: &[-2.0, 2.5], attack: 0.45, release: 1.0
 const CONTRABASS: BowCfg = BowCfg { detunes: &[-2.0, 2.5], attack: 0.5, release: 1.0, vibrato: 6.0, bright: 0.7 };
 const CHOIR: BowCfg = BowCfg { detunes: &[-9.0, 0.0, 8.0], attack: 0.8, release: 1.5, vibrato: 5.0, bright: 0.5 };
 const PAD: BowCfg = BowCfg { detunes: &[-10.0, 0.0, 10.0], attack: 1.6, release: 2.8, vibrato: 0.0, bright: 0.6 };
+const SAW_LEAD: BowCfg = BowCfg { detunes: &[-5.0, 5.0], attack: 0.12, release: 0.5, vibrato: 8.0, bright: 1.1 };
 const HALO: BowCfg = BowCfg { detunes: &[-14.0, 0.0, 13.0], attack: 1.4, release: 3.0, vibrato: 3.0, bright: 0.8 };
 
 struct Bowed {
@@ -626,6 +627,8 @@ impl SynthEngine for BuiltinSynth {
             50 | 51 => bowed(SYNTH_STRINGS, 0.2),
             52..=54 | 91 => bowed(CHOIR, 0.3),
             94 => bowed(HALO, 0.24),
+            80..=87 => bowed(SAW_LEAD, 0.24),
+            98 => struck(GLOCK, 0.28),
             88..=95 => bowed(PAD, 0.28),
             56..=67 => wind(HORN, 0.3),
             68 | 69 => wind(OBOE, 0.26),

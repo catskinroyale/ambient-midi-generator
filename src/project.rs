@@ -47,11 +47,12 @@ pub struct Settings {
     pub volume: f32,
     pub looping: bool,
     pub auto_regen: bool,
+    pub slideshow: crate::slideshow::Slideshow,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { volume: 0.9, looping: false, auto_regen: true }
+        Settings { volume: 0.9, looping: false, auto_regen: true, slideshow: Default::default() }
     }
 }
 
@@ -138,7 +139,7 @@ mod tests {
             FontEntry { name: "GeneralUser-GS.sf2".into(), path: None, bundled: true, embedded: None },
             FontEntry { name: "b.sf2".into(), path: None, bundled: false, embedded: Some(3) },
         ];
-        let settings = Settings { volume: 0.5, looping: true, auto_regen: false };
+        let settings = Settings { volume: 0.5, looping: true, auto_regen: false, ..Default::default() };
         let project = Project::new(params, Some("a.sf2".into()), fonts, settings);
         save(&path, &project, &[b"hello", b"sf2"]).unwrap();
         let (back, data) = load(&path).unwrap();
