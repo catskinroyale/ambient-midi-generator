@@ -48,11 +48,12 @@ pub struct Settings {
     pub looping: bool,
     pub auto_regen: bool,
     pub slideshow: crate::slideshow::Slideshow,
+    pub vary_sounds: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { volume: 0.9, looping: false, auto_regen: true, slideshow: Default::default() }
+        Settings { volume: 0.9, looping: false, auto_regen: true, slideshow: Default::default(), vary_sounds: true }
     }
 }
 

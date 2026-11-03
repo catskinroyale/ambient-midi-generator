@@ -59,6 +59,10 @@ pub struct App {
     show_controls: bool,
     /// Fitting a photo slideshow to the music.
     slideshow: Slideshow,
+    /// A new seed or style picks the parts' sounds from the style's palette.
+    vary_sounds: bool,
+    /// The style and seed the sounds were last picked for.
+    sounds_for: (Style, u64),
     about: About,
     #[cfg(target_os = "macos")]
     menu: Option<crate::menu::AppMenu>,
@@ -80,6 +84,7 @@ pub struct App {
 const KEY_THEME: &str = "theme";
 const KEY_CHECK_UPDATES: &str = "check_updates";
 const KEY_SLIDESHOW: &str = "slideshow";
+const KEY_VARY_SOUNDS: &str = "vary_sounds";
 
 
 /// What the audio engine was built from: the main font, and which channels go
@@ -170,6 +175,7 @@ impl App {
         };
         let check_updates = storage.and_then(|s| eframe::get_value(s, KEY_CHECK_UPDATES)).unwrap_or(true);
         let slideshow = storage.and_then(|s| eframe::get_value(s, KEY_SLIDESHOW)).unwrap_or_default();
+        let vary_sounds = storage.and_then(|s| eframe::get_value(s, KEY_VARY_SOUNDS)).unwrap_or(true);
         theme::install(&cc.egui_ctx);
         cc.egui_ctx.set_theme(theme);
         let params = Params::default();
@@ -206,6 +212,8 @@ impl App {
             theme,
             show_controls: true,
             slideshow,
+            vary_sounds,
+            sounds_for: (Style::EtherealPads, 0),
             about: About::default(),
             #[cfg(target_os = "macos")]
             menu: crate::menu::AppMenu::install(&cc.egui_ctx),
@@ -267,6 +275,7 @@ impl App {
             app.apply_style_sounds(old);
             app.regenerate();
         }
+        app.sounds_for = (app.params.style, app.params.seed);
         app.sync_engine();
         app
     }
@@ -632,6 +641,7 @@ impl App {
             looping: self.looping,
             auto_regen: self.auto_regen,
             slideshow: self.slideshow.clone(),
+            vary_sounds: self.vary_sounds,
         };
         let proj = Project::new(self.params.clone(), self.main_font.clone(), entries, settings);
         let slices: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
@@ -695,6 +705,8 @@ impl App {
         self.fonts_version += 1;
         self.main_font = proj.main_font.filter(|n| self.fonts.iter().any(|f| &f.name == n));
         self.params = proj.params;
+        self.keep_sounds();
+        self.vary_sounds = proj.settings.vary_sounds;
         self.volume = proj.settings.volume;
         self.looping = proj.settings.looping;
         self.auto_regen = proj.settings.auto_regen;
@@ -731,6 +743,7 @@ impl App {
         match midi_export::read_recipe(&path) {
             Ok(p) => {
                 self.params = p;
+                self.keep_sounds();
                 self.regenerate();
                 self.status = format!("Recreated from {}", path.display());
             }
@@ -880,9 +893,10 @@ impl App {
             widgets::note(
                 ui,
                 format!(
-                    "Set by the Slideshow section: {} bars ({}) for {} images.",
+                    "Set by the Slideshow section: {} bars ({}, {} with the reverb tail) for {} images.",
                     plan.bars(),
                     fmt_time(plan.total),
+                    fmt_time(plan.audio()),
                     plan.images
                 ),
                 "",
@@ -1147,7 +1161,7 @@ impl App {
         widgets::inset(ui, |ui| {
             let headline = match s.fit {
                 Fit::ImagesToTrack => format!("{} images", plan.images),
-                Fit::TrackToImages => format!("{} track", fmt_time(plan.total)),
+                Fit::TrackToImages => format!("{} track", fmt_time(plan.audio())),
             };
             ui.label(egui::RichText::new(headline).font(t.semibold(20.0)).color(t.text));
             ui.add_space(2.0);
@@ -1164,24 +1178,35 @@ impl App {
                 ),
                 ("Intro", format!("{} · {:.1} s", bars(plan.intro), plan.intro)),
                 ("Images", format!("{} · {}", plan.images, fmt_time(plan.images as f64 * plan.slot.secs))),
-                ("Outro", format!("{} · {:.1} s", bars(plan.outro), plan.outro)),
+                ("Outro", format!("{} · {:.1} s, then {:.0} s reverb tail", bars(plan.outro), plan.outro, plan.tail)),
                 (
                     "Track",
                     format!(
                         "{} · {} bars · {:.0} bpm in {}/{}",
-                        fmt_time(plan.total),
+                        fmt_time(plan.audio()),
                         plan.bars(),
                         plan.grid.bpm,
                         plan.grid.meter.0,
                         plan.grid.meter.1
                     ),
                 ),
+                ("Clip length", format!("{:.2} s where clips overlap (see tip)", plan.slot.secs + s.fade as f64)),
             ];
             for (k, v) in rows {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(84.0, 18.0), Sense::hover());
                     ui.painter().text(r.left_center(), Align2::LEFT_CENTER, k, t.font(12.0), t.text_dim);
-                    ui.add(egui::Label::new(egui::RichText::new(v).font(t.font(12.0)).color(t.text)).truncate());
+                    let help = if k == "Clip length" {
+                        "Editors such as iMovie, Clipchamp, CapCut and Photos overlap neighbouring clips to \
+                         crossfade them, which pulls every later image earlier by the fade. Make each image this \
+                         long there (the cue list's clip column) and the images stay on the beat."
+                    } else {
+                        ""
+                    };
+                    let r = ui.add(egui::Label::new(egui::RichText::new(v).font(t.font(12.0)).color(t.text)).truncate());
+                    if !help.is_empty() {
+                        r.on_hover_text(help);
+                    }
                 });
             }
             if s.fit == Fit::ImagesToTrack && plan.images == 0 {
@@ -1190,7 +1215,10 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 copy = widgets::text_button(ui, "Copy cue list", false, plan.images > 0)
-                    .on_hover_text("Copy each image's start and end time, as CSV, for your video editor")
+                    .on_hover_text(
+                        "Copy each image's start and end time, length, clip length (for editors that overlap \
+                         clips to crossfade), bar and beat, as CSV, for your video editor",
+                    )
                     .clicked();
                 save = widgets::text_button(ui, "Save cue list…", false, plan.images > 0)
                     .on_hover_text("Save each image's start and end time as a CSV file")
@@ -1213,18 +1241,24 @@ impl App {
     /// electronic styles play the bundled Ambient Electronic SoundFont), or back to
     /// the defaults when leaving a style that had its own.
     fn apply_style_sounds(&mut self, old: Style) {
+        if self.vary_sounds {
+            // sync_seed_sounds picks them
+            return;
+        }
         let new = self.params.style.suggested_sounds();
         if new.is_none() && old.suggested_sounds().is_none() {
             return;
         }
+        self.params.sounds = new.map_or_else(Sounds::default, |s| s.sounds);
+        self.route_electronic();
+    }
+
+    /// Route the parts of an electronic style to the Ambient Electronic
+    /// SoundFont's presets for their sounds; other styles don't use it.
+    fn route_electronic(&mut self) {
         let p = &mut self.params;
         p.fonts.retain(|(_, f)| f.font != ELECTRONIC_FONT);
-        let Some(suggested) = new else {
-            p.sounds = Sounds::default();
-            return;
-        };
-        p.sounds = suggested.sounds;
-        if !suggested.electronic {
+        if !p.style.suggested_sounds().is_some_and(|s| s.electronic) {
             return;
         }
         let Some(font) = self.fonts.iter().find(|f| f.name == ELECTRONIC_FONT) else {
@@ -1236,6 +1270,25 @@ impl App {
                 p.set_font(inst, Some(font.preset_for(preset)));
             }
         }
+    }
+
+    /// With "Sounds follow the seed", a new seed or style picks each part's
+    /// sound from the style's palette.
+    fn sync_seed_sounds(&mut self) {
+        let key = (self.params.style, self.params.seed);
+        if key == self.sounds_for {
+            return;
+        }
+        self.sounds_for = key;
+        if self.vary_sounds {
+            self.params.sounds = self.params.style.palette().pick(self.params.seed);
+            self.route_electronic();
+        }
+    }
+
+    /// Keep the sounds of loaded settings rather than picking new ones.
+    fn keep_sounds(&mut self) {
+        self.sounds_for = (self.params.style, self.params.seed);
     }
 
     fn recipe_ui(&mut self, ui: &mut egui::Ui) {
@@ -1256,6 +1309,7 @@ impl App {
                     match Params::from_recipe(&self.recipe_text) {
                         Ok(p) => {
                             self.params = p;
+                            self.keep_sounds();
                             self.regenerate();
                         }
                         Err(e) => self.status = format!("Invalid recipe: {e}"),
@@ -1479,14 +1533,28 @@ impl App {
                 if widgets::text_button(ui, "All on", false, true).clicked() {
                     self.params.muted.clear();
                 }
-                if widgets::text_button(ui, "Default sounds", false, true)
-                    .on_hover_text("General MIDI defaults, from the main sound")
+                if widgets::text_button(ui, "Style's sounds", false, true)
+                    .on_hover_text("The sounds this style is written for")
                     .clicked()
                 {
-                    self.params.sounds = Default::default();
                     self.params.fonts.clear();
+                    self.params.sounds = self.params.style.palette().first();
+                    self.route_electronic();
+                }
+                if widgets::text_button(ui, "Shuffle", false, true)
+                    .on_hover_text("Pick other sounds that suit this style")
+                    .clicked()
+                {
+                    let seed = Rng::new(time_seed()).next_u64();
+                    self.params.sounds = self.params.style.palette().pick(seed);
+                    self.route_electronic();
                 }
             });
+            ui.add_space(2.0);
+            ui.checkbox(&mut self.vary_sounds, "Sounds follow the seed").on_hover_text(
+                "Each new seed or style picks sounds that suit the style, so pieces don't all use the same \
+                 instruments. Turn off to keep the sounds you chose.",
+            );
         });
     }
 
@@ -1724,6 +1792,7 @@ impl eframe::App for App {
         eframe::set_value(storage, KEY_THEME, &theme.to_string());
         eframe::set_value(storage, KEY_CHECK_UPDATES, &self.check_updates);
         eframe::set_value(storage, KEY_SLIDESHOW, &self.slideshow);
+        eframe::set_value(storage, KEY_VARY_SOUNDS, &self.vary_sounds);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1781,6 +1850,7 @@ impl eframe::App for App {
             .frame(egui::Frame::central_panel(ui.style()).fill(tokens.canvas))
             .show(ui, |ui| self.piano_roll(ui));
 
+        self.sync_seed_sounds();
         self.sync_slideshow_length();
         // Wait until a slider drag is released so playback isn't constantly restarted.
         let dragging = ui.ctx().input(|i| i.pointer.any_down());

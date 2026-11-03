@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-03
+
+### Added
+- Four new styles (twenty in all): Celtic Air, Koto Garden, Gamelan Shimmer and Fingerstyle Guitar.
+- Sound palettes: every style has sounds that suit each part. With **Sounds follow the seed** (on by default), each new seed or style picks from them. **Style's sounds** and **Shuffle** buttons in Parts.
+- Koto, Steel Guitar, Tubular Bells and Shakuhachi sounds.
+- Song forms: each seed picks a form (A A B A, A B A C, A A B B A, A B C A and longer ones), from more chord progressions, including I-IV-ii-V, IV-V-iii-vi and the Andalusian i-VII-VI-v. Sections that come back are a little changed.
+- Arrangement that develops: a breakdown past the middle (bass, pulse and left hand drop away), often followed by the tune an octave higher, and elsewhere sections where the tune rests, the accompaniment thins or the pad drops out.
+
+### Changed
+- Recipes carry a generator `version`. Recipes without one, saved by earlier versions, play exactly as before.
+- "Default sounds" in Parts is now "Style's sounds".
+
+### Fixed
+- Slideshow images change on whole bars whenever a number of bars fits 4 to 8 seconds, preferring an even number, instead of on half bars, where every other change fell mid-bar with nothing playing. Half bars and beats are only used when a bar is too long or short.
+- The slideshow plan counts the 3-second reverb tail at the end of the audio, and exported WAV files are now exactly the plan's length (they used to run past it to the end of a 4096-sample block).
+- The cue list has a `clip` column: the length to give each image in editors that overlap clips to crossfade them (iMovie, Clipchamp, CapCut, Photos), so the images don't drift earlier by the fade at every change.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added
@@ -46,7 +64,8 @@ All notable changes to this project are documented here. The project uses
 
 First release: seven ambient styles, seeded and repeatable generation, a built-in synth, GeneralUser GS SoundFont playback, MIDI and WAV export, and per-part switches and sounds.
 
-[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/catskinroyale/ambient-midi-generator/releases/tag/v0.1.0

@@ -42,6 +42,10 @@ pub struct Timeline {
     pub duration: f64,
 }
 
+/// Seconds of silence after the music for reverb to die away, in playback
+/// and in exported audio.
+pub const REVERB_TAIL: f64 = 3.0;
+
 impl Timeline {
     pub fn from_song(song: &Song) -> Self {
         let mut events = Vec::new();
@@ -69,8 +73,7 @@ impl Timeline {
             Kind::On(..) => 3,
         };
         events.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap().then(order(&a.kind).cmp(&order(&b.kind))));
-        // allow reverb tails to finish
-        let duration = song.duration_secs() + 3.0;
+        let duration = song.duration_secs() + REVERB_TAIL;
         Timeline { events, spans, duration }
     }
 }
@@ -317,6 +320,8 @@ pub fn render_wav(
 ) -> Result<(), String> {
     let tl = Arc::new(Timeline::from_song(song));
     let total = tl.duration;
+    // exactly the timeline's length, so the file matches the slideshow plan
+    let mut left = (total * sample_rate as f64).round() as usize;
     let mut seq = Sequencer::new(engine, sample_rate);
     seq.set_timeline(tl, 0.0);
     let spec = hound::WavSpec {
@@ -330,12 +335,14 @@ pub fn render_wav(
     let mut r = vec![0.0f32; 4096];
     loop {
         let more = seq.render(&mut l, &mut r);
-        for i in 0..l.len() {
+        let n = l.len().min(left);
+        left -= n;
+        for i in 0..n {
             w.write_sample((l[i].clamp(-1.0, 1.0) * 32767.0) as i16).map_err(|e| e.to_string())?;
             w.write_sample((r[i].clamp(-1.0, 1.0) * 32767.0) as i16).map_err(|e| e.to_string())?;
         }
         progress.store(((seq.pos / total).min(1.0) * 1000.0) as u32, Ordering::Relaxed);
-        if !more {
+        if !more || left == 0 {
             break;
         }
     }
@@ -348,6 +355,16 @@ mod tests {
     use crate::generator::generate;
     use crate::song::{Instrumentation, Params, Style};
     use crate::synth::BuiltinSynth;
+
+    #[test]
+    fn wav_is_exactly_the_music_and_tail() {
+        let song = generate(&Params { target_seconds: 20.0, ..Params::default() });
+        let path = std::env::temp_dir().join(format!("midigen-test-{}.wav", std::process::id()));
+        render_wav(&song, Box::new(BuiltinSynth::new(22050)), 22050, &path, &AtomicU32::new(0)).unwrap();
+        let frames = hound::WavReader::open(&path).unwrap().duration() as usize;
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(frames, ((song.duration_secs() + REVERB_TAIL) * 22050.0).round() as usize);
+    }
 
     #[test]
     fn builtin_render_levels_and_speed() {

@@ -26,8 +26,19 @@ cargo run --release
 | Dub Chords | electronic dub: offbeat seventh-chord stabs echoing away over a deep sub bass and a sweeping pad |
 | Aurora | electronic: chord clusters that bloom note by note and fade together, a choir above and crystal bells |
 | Music Box Lullaby | a gentle 3/4 lullaby on a music box over a rocking harp or piano and soft strings |
+| Celtic Air | a slow 6/8 flute air with grace notes over rolling harp, a tonic-and-fifth drone and soft strings |
+| Koto Garden | koto in a five-note scale (hirajoshi in minor) with pulls, falling runs and tremolo, a breathy shakuhachi and an open-fifth drone |
+| Gamelan Shimmer | interlocking metallophone figures around a slow core melody in a five-note scale, a gong closing each cycle |
+| Fingerstyle Guitar | Travis-picked nylon guitar: alternating bass under syncopated treble, soft strings and a simple tune |
 
-The electronic styles and the lullaby come with their own sounds: choosing one sets the parts to them (the electronic styles play the bundled Ambient Electronic SoundFont), and choosing another style afterwards puts the defaults back. You can still change any part's sound.
+Every style has a palette of sounds that suit it. With **Sounds follow the seed** on (in Parts), each new seed or style picks its sounds from the palette, so pieces don't all use the same instruments. The electronic styles keep to the bundled Ambient Electronic SoundFont. **Style's sounds** puts back the sounds a style is written for, and **Shuffle** picks others. Turn the option off to keep the sounds you chose; then only the electronic styles and those with their own instruments change the sounds when you choose them.
+
+Pieces develop as they go. Each seed picks a song form, such as A A B A, A B A C or A B C A, from a larger set of chord progressions, and sections come back a little changed. The arrangement also changes from section to section:
+- **Breakdown:** somewhere past the middle, the bass, pulse and the keys' left hand drop away, and the tune often returns an octave higher afterwards.
+- **Rests and thinning:** elsewhere the tune may rest, the accompaniment thin out, or the pad drop out.
+- **Opening and ending:** the first and last sections play as the style wrote them.
+
+Recipes saved by earlier versions keep their `"version"` and play exactly as before.
 
 ## Controls
 
@@ -37,7 +48,7 @@ The electronic styles and the lullaby come with their own sounds: choosing one s
 - **Density, Variation, Dynamics, Humanize**: shape the result. Density thins or fills every part: melody, accompaniment rhythm, bass movement and how soon strings and pads join in. Each slider is labelled at both ends with which way is less and which is more, such as sparse ◀ ▶ busy.
 - **Parts**: each piece is arranged into up to five parts: Keys, Pad, Lead, Bass and Pluck. For each part you can:
   - switch it on or off. Switching a part off leaves the others note-for-note identical, and the piece keeps the same length.
-  - choose its sound from about 35 General MIDI sounds: pianos, electric piano, celesta, glockenspiel, music box, vibraphone, marimba, kalimba, harp, guitar, strings, choirs, pads, flute, clarinet, oboe, bassoon and French horn.
+  - choose its sound from about 40 General MIDI sounds: pianos, electric piano, celesta, glockenspiel, music box, vibraphone, marimba, kalimba, tubular bells, harp, guitars, koto, strings, choirs, pads, flute, pan flute, shakuhachi, clarinet, oboe, bassoon and French horn.
   Both choices are saved in the recipe and in the MIDI file. Parts the current style doesn't use are greyed out.
 - **Reverb & tuning**: these change the sound but not the notes, and apply straight away while the piece plays:
   - **Space**: Room, Hall, Cathedral, Shimmer (the tail rises an octave) or Black Hole (enormous, slowly swirling and almost endless).
@@ -71,12 +82,14 @@ Click or drag on the piano roll to seek. Space bar plays and pauses.
 
 ## Slideshows
 
-The **Slideshow** section fits a photo slideshow (for example, a YouTube video) to the music. Each image stays on screen for 4 to 8 seconds, crossfade included. Images change on bar lines when a whole number of bars comes within a second of the time you choose. Otherwise they change on half bars, or on beats. Set an intro (music before the first image, e.g. for a title) and an outro (music after the last, e.g. for credits) in bars.
+The **Slideshow** section fits a photo slideshow (for example, a YouTube video) to the music. Each image stays on screen for 4 to 8 seconds, crossfade included. Images change on bar lines, at the whole number of bars nearest the time you choose (an even number when two are equally near, since chords often last two bars). Only when no whole number of bars fits 4 to 8 seconds do they change on half bars, or on beats. Set an intro (music before the first image, e.g. for a title) and an outro (music after the last, e.g. for credits) in bars. The audio ends with 3 seconds of reverb tail after the outro.
 
 - **Images for track** counts how many images the current track holds. Any time too short for one more image goes to the outro.
 - **Track for images** takes a number of images and sets the piece's length in bars to fit them, intro and outro included.
 
-The plan shows the time per image (and how much of it is clear of the fades), the intro, the images, the outro and the track's length. **Copy cue list** and **Save cue list…** give each image's start and end time and its bar and beat as CSV, for your video editor. The image changes can also be marked on the piano roll. The slideshow settings are saved in projects.
+The plan shows the time per image (and how much of it is clear of the fades), the intro, the images, the outro and the track's length. **Copy cue list** and **Save cue list…** give each image's start and end time and its bar and beat as CSV, for your video editor. A start is when that image begins to fade in.
+
+Many editors (iMovie, Clipchamp, CapCut, Photos) overlap neighbouring clips to crossfade them. That pulls every later image earlier by the fade, so the images drift off the beat. In those editors, make each image as long as the cue list's `clip` column (its time plus the fade). The image changes can also be marked on the piano roll. The slideshow settings are saved in projects.
 
 ## Projects
 

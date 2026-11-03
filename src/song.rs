@@ -22,10 +22,14 @@ pub enum Style {
     DubChords,
     Aurora,
     Lullaby,
+    CelticAir,
+    KotoGarden,
+    Gamelan,
+    Fingerstyle,
 }
 
 impl Style {
-    pub const ALL: [Style; 16] = [
+    pub const ALL: [Style; 20] = [
         Style::EtherealPads,
         Style::Gymnopedie,
         Style::GenerativeLoops,
@@ -42,6 +46,10 @@ impl Style {
         Style::DubChords,
         Style::Aurora,
         Style::Lullaby,
+        Style::CelticAir,
+        Style::KotoGarden,
+        Style::Gamelan,
+        Style::Fingerstyle,
     ];
 
     pub fn label(self) -> &'static str {
@@ -62,6 +70,10 @@ impl Style {
             Style::DubChords => "Dub Chords",
             Style::Aurora => "Aurora",
             Style::Lullaby => "Music Box Lullaby",
+            Style::CelticAir => "Celtic Air",
+            Style::KotoGarden => "Koto Garden",
+            Style::Gamelan => "Gamelan Shimmer",
+            Style::Fingerstyle => "Fingerstyle Guitar",
         }
     }
 
@@ -115,6 +127,18 @@ impl Style {
             Style::Lullaby => {
                 "A gentle 3/4 lullaby on a music box, over a rocking harp or piano and soft strings."
             }
+            Style::CelticAir => {
+                "A slow 6/8 air: a flute tune with grace notes over rolling harp, a drone on the tonic and fifth, and soft strings."
+            }
+            Style::KotoGarden => {
+                "A five-note scale on koto, with plucks, slides and tremolo, a breathy shakuhachi and a quiet open-fifth drone. Minor modes give the hirajoshi scale."
+            }
+            Style::Gamelan => {
+                "Interlocking metallophone patterns around a slow core melody in a five-note scale, a gong closing each cycle, and a hazy pad."
+            }
+            Style::Fingerstyle => {
+                "Travis-picked nylon guitar: a steady alternating bass under syncopated treble notes, with soft strings and a simple tune."
+            }
         }
     }
 
@@ -136,6 +160,10 @@ impl Style {
             Style::DubChords => 68.0,
             Style::Aurora => 48.0,
             Style::Lullaby => 66.0,
+            Style::CelticAir => 60.0,
+            Style::KotoGarden => 54.0,
+            Style::Gamelan => 72.0,
+            Style::Fingerstyle => 76.0,
         }
     }
 
@@ -146,6 +174,7 @@ impl Style {
             Style::NocturneDrift => (6, 8),
             Style::Tintinnabuli => (6, 4),
             Style::Lullaby => (3, 4),
+            Style::CelticAir => (6, 8),
             _ => (4, 4),
         }
     }
@@ -156,18 +185,96 @@ impl Style {
             sounds: Sounds { keys, pad, lead, bass, pluck },
             electronic: true,
         };
+        let acoustic = |keys, pad, lead, bass, pluck| SuggestedSounds {
+            sounds: Sounds { keys, pad, lead, bass, pluck },
+            electronic: false,
+        };
         match self {
             // Sub bass, analogue pluck and saw lead, warm or sweeping pads, crystal bells
             Style::BerlinSchool => Some(electronic(98, 88, 81, 38, 45)),
             Style::DubChords => Some(electronic(4, 95, 89, 38, 45)),
             Style::Aurora => Some(electronic(98, 94, 91, 88, 0)),
             // music box, harp, slow strings, flute, cello
-            Style::Lullaby => Some(SuggestedSounds {
-                sounds: Sounds { keys: 10, pad: 49, lead: 73, bass: 42, pluck: 46 },
-                electronic: false,
-            }),
+            Style::Lullaby => Some(acoustic(10, 49, 73, 42, 46)),
+            // harp, slow strings, flute, cello drone, harp
+            Style::CelticAir => Some(acoustic(46, 49, 73, 42, 46)),
+            // koto, warm pad, shakuhachi, cello, koto
+            Style::KotoGarden => Some(acoustic(107, 89, 77, 42, 107)),
+            // vibraphone, warm pad, pan flute, tubular bells as the gong, glockenspiel
+            Style::Gamelan => Some(acoustic(11, 89, 75, 14, 9)),
+            // nylon guitar, slow strings, flute, acoustic bass, harp
+            Style::Fingerstyle => Some(acoustic(24, 49, 73, 32, 46)),
             _ => None,
         }
+    }
+
+    /// Sounds that suit each part of the style. The first of each is the
+    /// style's own (its suggested sound, or the default); a seed picks among them.
+    pub fn palette(self) -> Palette {
+        const fn pal(
+            keys: &'static [u8],
+            pad: &'static [u8],
+            lead: &'static [u8],
+            bass: &'static [u8],
+            pluck: &'static [u8],
+        ) -> Palette {
+            Palette { keys, pad, lead, bass, pluck }
+        }
+        match self {
+            Style::EtherealPads => pal(&[0, 8, 11, 46, 4], &[49, 48, 89, 94, 52], &[40, 73, 41, 53], &[42, 43, 41], &[45, 46, 108]),
+            Style::Gymnopedie => pal(&[0, 4, 1], &[49, 48, 52], &[40, 73, 71, 68], &[42, 32], &[45, 46]),
+            Style::GenerativeLoops => {
+                pal(&[0, 11, 4, 12, 108, 8], &[49, 89, 94, 88, 53], &[40, 73, 75, 52], &[42, 43], &[45, 46, 12, 108])
+            }
+            Style::MinimalArpeggios => pal(&[0, 4, 1, 12, 46], &[49, 48, 50], &[40, 41, 73, 71], &[42, 43], &[45, 46, 12]),
+            Style::Rainfall => pal(&[0, 4, 8, 11, 108, 46], &[49, 89, 94, 48], &[40, 73, 75], &[42, 43], &[45, 46, 108]),
+            Style::CinematicSwell => pal(&[0, 1, 46], &[49, 48, 52, 50], &[40, 60, 73, 41], &[42, 43, 70], &[45, 46]),
+            Style::NocturneDrift => pal(&[0, 4, 1], &[49, 48, 52], &[40, 41, 71, 73], &[42, 43], &[45, 46]),
+            Style::Tintinnabuli => pal(&[0, 8, 11, 9], &[49, 52, 53, 48], &[40, 41, 73], &[42, 43], &[45, 46, 14]),
+            Style::Chorale => pal(&[0, 1], &[49, 52, 48, 53], &[40, 41, 68, 60], &[42, 43, 70], &[45, 46]),
+            Style::Canon => pal(&[0, 46, 24], &[49, 48], &[40, 41, 73, 68], &[42, 43, 70], &[45, 46, 24]),
+            Style::TidalDrone => pal(&[0, 11, 8, 9], &[49, 89, 94, 52, 95], &[40, 53, 73], &[42, 43], &[45, 46, 11]),
+            Style::FeltBallad => pal(&[0, 4, 5, 1], &[49, 89, 48], &[40, 73, 71, 11], &[42, 32], &[45, 46, 24]),
+            // the electronic styles keep to presets in the Ambient Electronic SoundFont
+            Style::BerlinSchool => pal(&[98, 0, 4], &[88, 89, 94, 50, 95], &[81, 91], &[38], &[45, 98, 0]),
+            Style::DubChords => pal(&[4, 0, 98], &[95, 89, 88, 94], &[89, 91, 81], &[38], &[45, 4]),
+            Style::Aurora => pal(&[98, 0, 4], &[94, 91, 88, 89, 50], &[91, 94], &[88, 89], &[0, 98, 45]),
+            Style::Lullaby => pal(&[10, 8, 9, 108], &[49, 48, 52], &[73, 40, 75], &[42, 32], &[46, 24, 45]),
+            Style::CelticAir => pal(&[46, 24, 0], &[49, 48, 52], &[73, 75, 40, 71], &[42, 43], &[46, 24]),
+            Style::KotoGarden => pal(&[107, 46, 108], &[89, 52, 94, 49], &[77, 73, 75], &[42, 32], &[107, 46]),
+            Style::Gamelan => pal(&[11, 12, 8, 108], &[89, 94, 88, 52], &[75, 73, 77], &[14, 11], &[9, 108, 12, 98]),
+            Style::Fingerstyle => pal(&[24, 25, 46], &[49, 89, 48], &[73, 40, 71, 11], &[32, 42], &[46, 24, 11]),
+        }
+    }
+}
+
+/// Sounds that suit each part of a style (General MIDI programs).
+pub struct Palette {
+    pub keys: &'static [u8],
+    pub pad: &'static [u8],
+    pub lead: &'static [u8],
+    pub bass: &'static [u8],
+    pub pluck: &'static [u8],
+}
+
+impl Palette {
+    /// A seed's choice: the style's own sound half the time, otherwise another.
+    pub fn pick(&self, seed: u64) -> Sounds {
+        let mut rng = crate::rng::Rng::stream(seed, "sounds");
+        let mut one = |list: &[u8]| {
+            if list.len() < 2 || rng.chance(0.5) { list[0] } else { list[rng.range(1, list.len() as i32 - 1) as usize] }
+        };
+        Sounds {
+            keys: one(self.keys),
+            pad: one(self.pad),
+            lead: one(self.lead),
+            bass: one(self.bass),
+            pluck: one(self.pluck),
+        }
+    }
+
+    pub fn first(&self) -> Sounds {
+        Sounds { keys: self.keys[0], pad: self.pad[0], lead: self.lead[0], bass: self.bass[0], pluck: self.pluck[0] }
     }
 }
 
@@ -245,6 +352,17 @@ pub struct Params {
     /// Reverb space and tuning. These only change the sound, not the notes.
     #[serde(default)]
     pub fx: Fx,
+    /// The generator version the recipe was made with, so recipes saved by
+    /// earlier versions keep their music. Version 2 added song forms, more
+    /// progressions and arrangement changes between sections.
+    #[serde(default = "first_version")]
+    pub version: u32,
+}
+
+pub const GENERATOR_VERSION: u32 = 2;
+
+fn first_version() -> u32 {
+    1
 }
 
 /// The reverb's character.
@@ -417,12 +535,15 @@ pub const SOUNDS: &[Sound] = &[
     snd(8, "Celesta", "Mallets & bells"),
     snd(9, "Glockenspiel", "Mallets & bells"),
     snd(10, "Music Box", "Mallets & bells"),
+    snd(14, "Tubular Bells", "Mallets & bells"),
     snd(11, "Vibraphone", "Mallets & bells"),
     snd(12, "Marimba", "Mallets & bells"),
     snd(108, "Kalimba", "Mallets & bells"),
     snd(46, "Harp", "Plucked"),
     snd(45, "Pizzicato Strings", "Plucked"),
     snd(24, "Nylon Guitar", "Plucked"),
+    snd(25, "Steel Guitar", "Plucked"),
+    snd(107, "Koto", "Plucked"),
     snd(32, "Acoustic Bass", "Plucked"),
     snd(49, "Slow Strings", "Strings"),
     snd(48, "String Ensemble", "Strings"),
@@ -443,6 +564,7 @@ pub const SOUNDS: &[Sound] = &[
     snd(98, "Crystal", "Synth"),
     snd(73, "Flute", "Winds"),
     snd(75, "Pan Flute", "Winds"),
+    snd(77, "Shakuhachi", "Winds"),
     snd(71, "Clarinet", "Winds"),
     snd(68, "Oboe", "Winds"),
     snd(70, "Bassoon", "Winds"),
@@ -483,6 +605,7 @@ impl Default for Params {
             muted: Vec::new(),
             fonts: Vec::new(),
             fx: Fx::default(),
+            version: GENERATOR_VERSION,
         }
     }
 }
