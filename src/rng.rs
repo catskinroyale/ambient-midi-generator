@@ -16,7 +16,7 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn hash_str(s: &str) -> u64 {
+pub fn hash_str(s: &str) -> u64 {
     // FNV-1a
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {

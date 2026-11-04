@@ -133,10 +133,13 @@ pub fn generate(p: &Params) -> Song {
         Style::KotoGarden => ctx.koto_garden(),
         Style::Gamelan => ctx.gamelan(),
         Style::Fingerstyle => ctx.fingerstyle(),
+        Style::NeonNoir => ctx.neon_noir(),
     }
     ctx.arrange(secs_per_bar);
 
-    ctx.finish(bpm, meter)
+    let mut song = ctx.finish(bpm, meter);
+    crate::expression::apply(&mut song);
+    song
 }
 
 impl<'a> Ctx<'a> {
@@ -189,6 +192,39 @@ impl<'a> Ctx<'a> {
             voicing.remove(voicing.len() / 2);
         }
         voicing
+    }
+
+    /// From version 3, a seeded choice among `n` treatments of one aspect of a
+    /// style (its accompaniment, bass, ...), each aspect chosen independently,
+    /// so pieces in the same style differ in more than their notes. 0 is the
+    /// way earlier versions played it.
+    fn variant(&self, axis: &str, n: u32) -> u32 {
+        if self.p.version < 3 || n < 2 {
+            return 0;
+        }
+        Rng::stream(self.p.seed, &format!("{:?}-{axis}", self.p.style)).range(0, n as i32 - 1) as u32
+    }
+
+    /// From version 3, the tune's phrasing varies with the seed: short
+    /// answering phrases with more space, long lines with grace notes, or the
+    /// tune moved up (or down, if it is already high).
+    fn vary_melody(&self, cfg: &mut MelodyCfg) {
+        match self.variant("melody", 4) {
+            1 => {
+                cfg.phrase_bars = (cfg.phrase_bars / 2).max(2);
+                cfg.rest_bar_prob = (cfg.rest_bar_prob + 0.15).min(0.6);
+            }
+            2 => {
+                cfg.phrase_bars *= 2;
+                cfg.ornaments = true;
+            }
+            3 => {
+                let shift = if cfg.hi >= 16 { -2 } else { 2 };
+                cfg.lo += shift;
+                cfg.hi += shift;
+            }
+            _ => {}
+        }
     }
 
     fn note(&mut self, inst: Inst, start: u32, dur: u32, key: i32, vel: f64) {
@@ -490,12 +526,20 @@ impl<'a> Ctx<'a> {
         let mut rng = self.rng("pads");
         let mut prev = Vec::new();
         let overlap = self.ppq / 2;
+        // the pads close, spread wide, or high and airy
+        let voicing_kind = self.variant("voicing", 3);
+        let (lo, hi) = match voicing_kind {
+            1 => (45, 81),
+            2 => (57, 83),
+            _ => (50, 76),
+        };
         for b in (0..self.bars).step_by(hr as usize) {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
             let span = hr.min(self.bars - b) * self.bar;
             let start = b * self.bar;
-            let voicing = voice_lead(&chord.pitch_classes(&self.scale), &prev, 50, 76, rng.chance(0.5));
+            let spread = rng.chance(0.5) || voicing_kind == 1;
+            let voicing = voice_lead(&chord.pitch_classes(&self.scale), &prev, lo, hi, spread);
             prev = voicing.clone();
             self.pad(start, span + overlap, &self.thin(voicing), 45.0 + 40.0 * it);
             let k = self.bass_key(&chord, 36);
@@ -514,11 +558,39 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        // High, sparse sparkles.
+        // High, sparse sparkles: scattered, each echoed an octave down, or
+        // falling chimes at each chord change.
         let mut rng = self.rng("sparkles");
         let d = self.p.density as f64;
         let e = self.ppq / 2;
+        let sparkle = self.variant("sparkle", 3);
+        if sparkle == 2 {
+            for b in (0..self.bars).step_by(hr as usize) {
+                let it = self.it(b);
+                if !rng.chance(0.3 + 0.6 * d * it) {
+                    continue;
+                }
+                let chord = self.harmony[b as usize].clone();
+                let mut deg = rng.range(12, 16);
+                while !chord.contains(deg) {
+                    deg += 1;
+                }
+                let inst = if self.piano { Inst::Piano } else { Inst::Violin };
+                let at = b * self.bar + rng.range(1, 3) as u32 * e;
+                for i in 0..3u32 {
+                    let key = self.scale.midi(deg);
+                    self.note(inst, at + i * 3 * e, 4 * self.ppq, key, 24.0 + 30.0 * it - i as f64 * 4.0);
+                    deg -= 1;
+                    while !chord.contains(deg) {
+                        deg -= 1;
+                    }
+                }
+            }
+        }
         for b in 0..self.bars {
+            if sparkle == 2 {
+                break;
+            }
             let it = self.it(b);
             let n = rng.poisson(0.3 + d * 2.5 * it);
             let chord = self.harmony[b as usize].clone();
@@ -531,7 +603,11 @@ impl<'a> Ctx<'a> {
                 let key = self.scale.midi(deg);
                 if self.piano {
                     let dur = rng.range(2, 6) as u32 * self.ppq;
-                    self.note(Inst::Piano, pos, dur, key, 26.0 + 32.0 * it + rng.gauss() * 4.0);
+                    let vel = 26.0 + 32.0 * it + rng.gauss() * 4.0;
+                    self.note(Inst::Piano, pos, dur, key, vel);
+                    if sparkle == 1 {
+                        self.note(Inst::Piano, pos + 3 * e, dur, key - 12, vel * 0.7);
+                    }
                 } else {
                     let dur = rng.range(4, 8) as u32 * self.ppq;
                     self.note(Inst::Violin, pos, dur, key, 22.0 + 25.0 * it);
@@ -539,20 +615,24 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        // A slow violin line at the high point of the piece.
+        // A slow violin line at the high point of the piece (from version 3,
+        // sometimes a longer one, lower down).
+        let long_line = self.variant("line", 2) == 1;
         if self.strings && d > 0.3 {
+            let when = if long_line { 0.5 } else { 0.7 };
             let insts: Vec<Option<Inst>> =
-                (0..self.bars).map(|b| (self.full(b) > 0.7).then_some(Inst::Violin)).collect();
+                (0..self.bars).map(|b| (self.full(b) > when).then_some(Inst::Violin)).collect();
             let mut rng = self.rng("melody");
-            let cfg = MelodyCfg {
-                lo: 7,
-                hi: 16,
+            let mut cfg = MelodyCfg {
+                lo: if long_line { 4 } else { 7 },
+                hi: if long_line { 12 } else { 16 },
                 patterns: PAT_SLOW_44,
                 phrase_bars: 4,
                 vel: 52.0,
                 rest_bar_prob: 0.2,
                 ornaments: false,
             };
+            self.vary_melody(&mut cfg);
             let m = self.melody(&mut rng, &cfg, &insts);
             self.notes.extend(m);
         }
@@ -563,6 +643,10 @@ impl<'a> Ctx<'a> {
         let mut rng = self.rng("accomp");
         let mut prev = Vec::new();
         let beat = self.ppq;
+        // the left hand: bass and chord, oom-pah-pah with the bass alternating
+        // root and fifth, or the chord rolled upwards
+        let accomp = self.variant("accomp", 3);
+        let bass_fifth = |k: i32| if k + 7 > 50 { k - 5 } else { k + 7 };
         for b in 0..self.bars {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
@@ -581,11 +665,26 @@ impl<'a> Ctx<'a> {
             if self.density() < 0.3 && chord_keys.len() >= 3 {
                 chord_keys.remove(1);
             }
-            let hits: &[(u32, u32)] =
-                if self.density() > 0.65 && full > 0.5 { &[(1, 1), (2, 1)] } else { &[(1, 2)] };
+            let hits: &[(u32, u32)] = if (self.density() > 0.65 && full > 0.5) || accomp == 1 {
+                &[(1, 1), (2, 1)]
+            } else {
+                &[(1, 2)]
+            };
+            // from version 3: the bass alternates root and fifth bar by bar
+            let bass = if accomp == 1 && b % 2 == 1 && b + 1 < self.bars { bass_fifth(bass) } else { bass };
             if self.piano {
                 self.note(Inst::Piano, start, 3 * beat, bass, 50.0 + 15.0 * it + swing * 0.3);
+                if accomp == 2 {
+                    // the chord rolled upwards in quavers from beat 2
+                    for (i, k) in chord_keys.iter().enumerate() {
+                        let at = start + beat + i as u32 * beat / 2;
+                        self.note(Inst::Piano, at, 2 * beat - i as u32 * beat / 2, *k, 32.0 + 14.0 * it - i as f64 * 2.0);
+                    }
+                }
                 for &(on, len) in hits {
+                    if accomp == 2 {
+                        break;
+                    }
                     for k in &chord_keys {
                         let soft = if on == 2 { 5.0 } else { 0.0 };
                         self.note(Inst::Piano, start + on * beat, len * beat, *k, 34.0 + 14.0 * it - soft);
@@ -616,7 +715,7 @@ impl<'a> Ctx<'a> {
             .map(|b| (b >= 2 && b + 1 < self.bars).then_some(mel_inst))
             .collect();
         let mut rng = self.rng("melody");
-        let cfg = MelodyCfg {
+        let mut cfg = MelodyCfg {
             lo: 7,
             hi: 16,
             patterns: PAT_WALTZ,
@@ -625,6 +724,7 @@ impl<'a> Ctx<'a> {
             rest_bar_prob: 0.05 + 0.25 * (1.0 - self.p.density as f64),
             ornaments: true,
         };
+        self.vary_melody(&mut cfg);
         let m = self.melody(&mut rng, &cfg, &insts);
         self.notes.extend(m);
     }
@@ -645,6 +745,13 @@ impl<'a> Ctx<'a> {
         let beat_t = self.ppq as f64;
         let total_beats = (self.bars * self.bar) as f64 / beat_t;
         let voices = 3 + (d * 4.0).round() as usize;
+        // from version 3: short cells phasing quickly, or long tape loops
+        let loops = self.variant("loops", 3);
+        let (len_lo, len_hi, notes_hi) = match loops {
+            1 => (7.0, 13.0, 2),
+            2 => (24.0, 44.0, 4),
+            _ => (14.0, 32.0, 3),
+        };
         for vi in 0..voices {
             let inst = match (self.piano, self.strings) {
                 (true, true) => {
@@ -653,8 +760,8 @@ impl<'a> Ctx<'a> {
                 (true, false) => Inst::Piano,
                 _ => [Inst::StringPad, Inst::Violin, Inst::Cello][vi % 3],
             };
-            let loop_len = (rng.range_f(14.0, 32.0) * 4.0).round() / 4.0;
-            let k = rng.range(1, 3);
+            let loop_len = (rng.range_f(len_lo, len_hi) * 4.0).round() / 4.0;
+            let k = rng.range(1, notes_hi);
             let mut phrase: Vec<(f64, i32, f64)> = (0..k)
                 .map(|_| {
                     let off = (rng.range_f(0.0, loop_len * 0.6) * 2.0).round() / 2.0;
@@ -663,6 +770,7 @@ impl<'a> Ctx<'a> {
                         deg -= 7;
                     }
                     let dur = if inst == Inst::Piano { rng.range_f(3.0, 6.0) } else { rng.range_f(4.0, 8.0) };
+                    let dur = if loops == 1 { dur * 0.6 } else { dur };
                     (off, deg, dur)
                 })
                 .collect();
@@ -698,21 +806,28 @@ impl<'a> Ctx<'a> {
                 t += loop_len;
             }
         }
-        // Drone
+        // Drone: tonic and fifth; from version 3 sometimes a hollow tonic and
+        // octave, or one that only sounds in the fuller stretches.
         let seg = 8 * self.bar;
         let tonic = self.bass_key(&Chord::new(0, Ext::Triad), 36);
+        let drone = self.variant("drone", 3);
+        let upper = if drone == 1 { tonic + 12 } else { tonic + 7 };
         let mut b = 0;
         while b < self.bars {
             let start = b * self.bar;
             let span = seg.min((self.bars - b) * self.bar);
             let it = self.it(b);
+            if drone == 2 && self.full(b) < 0.45 && b > 0 {
+                b += 8;
+                continue;
+            }
             if self.strings {
                 self.note(Inst::Cello, start, span + self.ppq, tonic, 30.0 + 25.0 * it);
-                self.note(Inst::Cello, start, span + self.ppq, tonic + 7, 24.0 + 20.0 * it);
+                self.note(Inst::Cello, start, span + self.ppq, upper, 24.0 + 20.0 * it);
                 self.swell(Inst::Cello, start, span, 60.0, 90.0 + 20.0 * it, 60.0);
             } else {
                 self.note(Inst::Piano, start, span, tonic, 30.0 + 12.0 * it);
-                self.note(Inst::Piano, start + self.ppq / 6, span, tonic + 7, 26.0 + 10.0 * it);
+                self.note(Inst::Piano, start + self.ppq / 6, span, upper, 26.0 + 10.0 * it);
             }
             b += 8;
         }
@@ -728,7 +843,18 @@ impl<'a> Ctx<'a> {
             [0, 1, 2, 1, 3, 2, 4, 2],
             [0, 2, 3, 4, 0, 2, 3, 4],
         ];
+        // From version 3, other figures: Alberti-like, falling and leaping
+        // patterns, or groups of three crossing the beat.
+        const MORE: [[usize; 8]; 4] = [
+            [0, 2, 1, 2, 0, 2, 1, 2],
+            [4, 3, 2, 1, 0, 1, 2, 3],
+            [0, 4, 1, 3, 2, 4, 1, 3],
+            [0, 2, 4, 0, 2, 4, 0, 2],
+        ];
         let sec_pat = [rng.range(0, 3) as usize, rng.range(0, 3) as usize, rng.range(0, 3) as usize];
+        let figures = if self.variant("figure", 2) == 1 { MORE } else { PATS };
+        // from version 3, the cello may pulse in crotchets instead of holding
+        let pulse_bass = self.variant("bass", 2) == 1;
         let e = self.ppq / 2;
         let arp_inst = if self.piano { Inst::Piano } else { Inst::Pizzicato };
         let mut prev = Vec::new();
@@ -744,7 +870,7 @@ impl<'a> Ctx<'a> {
                 _ => [0, 4, 7, 9, 11],
             };
             let keys: Vec<i32> = offs.iter().map(|o| self.scale.midi(low + o)).collect();
-            let pat = PATS[sec_pat[self.section[b as usize] as usize]];
+            let pat = figures[sec_pat[self.section[b as usize] as usize]];
             let fast = it > 0.75 && self.p.density > 0.5;
             // sparse: crotchets in the quiet stretches
             let slow = self.density() < 0.3 && self.full(b) < 0.5;
@@ -764,7 +890,12 @@ impl<'a> Ctx<'a> {
                     }
                     self.swell(Inst::StringPad, start, self.bar, 60.0, 80.0 + 30.0 * it, 65.0);
                 }
-                if self.full(b) > 0.2 {
+                if pulse_bass && self.full(b) > 0.45 && b + 1 < self.bars {
+                    for i in 0..self.bar / self.ppq {
+                        let accent = if i == 0 { 6.0 } else { 0.0 };
+                        self.note(Inst::Cello, start + i * self.ppq, self.ppq * 3 / 4, keys[0], 36.0 + 30.0 * it + accent);
+                    }
+                } else if self.full(b) > 0.2 {
                     self.note(Inst::Cello, start, self.bar + e / 2, keys[0], 40.0 + 35.0 * it);
                 }
             } else if self.strings {
@@ -791,7 +922,7 @@ impl<'a> Ctx<'a> {
             })
             .collect();
         let mut rng = self.rng("melody");
-        let cfg = MelodyCfg {
+        let mut cfg = MelodyCfg {
             lo: 7,
             hi: 15,
             patterns: PAT_MOVING_44,
@@ -800,6 +931,7 @@ impl<'a> Ctx<'a> {
             rest_bar_prob: 0.25 * (1.0 - self.p.density as f64),
             ornaments: false,
         };
+        self.vary_melody(&mut cfg);
         let m = self.melody(&mut rng, &cfg, &insts);
         self.notes.extend(m);
     }
@@ -809,13 +941,24 @@ impl<'a> Ctx<'a> {
         self.plan_harmony(hr, [0.2, 0.4, 0.1, 0.0, 0.3, 0.0], &[]);
         let mut rng = self.rng("bed");
         let mut prev = Vec::new();
+        // from version 3, the left hand may ripple slowly up through the chord
+        let ripple = self.variant("bed", 2) == 1;
         for b in (0..self.bars).step_by(hr as usize) {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
             let span = hr.min(self.bars - b) * self.bar;
             let start = b * self.bar;
             let bass = self.bass_key(&chord, 36);
-            if self.piano {
+            if self.piano && ripple && span >= 2 * self.bar {
+                let mut third = self.scale.midi(chord.root + Self::third_of(&chord));
+                while third - bass > 19 {
+                    third -= 12;
+                }
+                for (i, k) in [bass, bass + 7, bass + 12, third].iter().enumerate() {
+                    let at = start + i as u32 * span / 4;
+                    self.note(Inst::Piano, at, span - i as u32 * span / 4, *k, 32.0 + 12.0 * it - i as f64 * 3.0);
+                }
+            } else if self.piano {
                 self.note(Inst::Piano, start, span, bass, 32.0 + 12.0 * it);
                 // busy: a soft fifth and octave answer the bass
                 if self.density() > 0.65 && self.full(b) > 0.4 && span >= 2 * self.bar {
@@ -839,16 +982,30 @@ impl<'a> Ctx<'a> {
         let d = self.p.density as f64;
         let s16 = self.ppq / 4;
         let drop_inst = if self.piano { Inst::Piano } else { Inst::Pizzicato };
+        // from version 3: a light drizzle of single high drops, or showers,
+        // where quiet bars alternate with bursts of falling runs
+        let rain = self.variant("drops", 3);
         for b in 0..self.bars {
             let it = self.it(b);
-            let n = rng.poisson(0.6 + d * 4.5 * it);
+            let mean = match rain {
+                1 => 0.9 + d * 5.0 * it,
+                2 if b % 4 >= 2 => 1.0 + d * 6.0 * it,
+                2 => 0.3 + d * 1.5 * it,
+                _ => 0.6 + d * 4.5 * it,
+            };
+            let n = rng.poisson(mean);
             for _ in 0..n {
                 let pos = b * self.bar + rng.range(0, (self.bar / s16) as i32 - 1) as u32 * s16;
-                let mut deg = rng.range(5, 20);
+                let mut deg = if rain == 1 { rng.range(9, 22) } else { rng.range(5, 20) };
                 while !self.scale.is_pentatonic(deg) {
                     deg += 1;
                 }
-                let cascade = if rng.chance(0.15) { rng.range(2, 4) } else { 1 };
+                let cascade = match rain {
+                    1 => 1,
+                    2 if rng.chance(0.35) => rng.range(3, 6),
+                    _ if rng.chance(0.15) => rng.range(2, 4),
+                    _ => 1,
+                };
                 for c in 0..cascade {
                     let key = self.scale.midi(deg);
                     let vel = 24.0 + 34.0 * it + rng.gauss() * 6.0 - c as f64 * 4.0;
@@ -871,6 +1028,10 @@ impl<'a> Ctx<'a> {
         self.plan_harmony(1, [0.35, 0.25, 0.2, 0.0, 0.1, 0.1], &[]);
         let mut prev = Vec::new();
         let mut prev_pulse = Vec::new();
+        // the pulse: repeated chords; from version 3 also a broken-chord
+        // ostinato, or chords in a 3+3+2 rhythm
+        let pulse = self.variant("pulse", 3);
+        let e = self.ppq / 2;
         for b in 0..self.bars {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
@@ -905,7 +1066,21 @@ impl<'a> Ctx<'a> {
                 (self.ppq, 4)
             };
             let v = if self.density() < 0.3 { self.thin(v) } else { v };
-            if full > 0.2 || !self.strings {
+            if (full > 0.2 || !self.strings) && pulse == 1 && full >= 0.4 {
+                const ORDER: [usize; 8] = [0, 1, 2, 1, 3, 1, 2, 1];
+                for (i, o) in ORDER.iter().enumerate() {
+                    let k = v[o % v.len()];
+                    let accent = if i == 0 { 6.0 } else if i % 2 == 0 { 2.0 } else { 0.0 };
+                    self.note(pulse_inst, start + i as u32 * e, 2 * e, k, 30.0 + 26.0 * it + accent);
+                }
+            } else if (full > 0.2 || !self.strings) && pulse == 2 && full >= 0.4 {
+                for (on, len) in [(0, 3), (3, 3), (6, 2)] {
+                    for k in &v {
+                        let accent = if on == 0 { 6.0 } else { 2.0 };
+                        self.note(pulse_inst, start + on * e, len * e, *k, 28.0 + 26.0 * it + accent);
+                    }
+                }
+            } else if full > 0.2 || !self.strings {
                 for i in 0..n {
                     for k in &v {
                         let accent = if i == 0 { 6.0 } else { 0.0 };
@@ -918,7 +1093,7 @@ impl<'a> Ctx<'a> {
         let insts: Vec<Option<Inst>> =
             (0..self.bars).map(|b| (self.full(b) > 0.5).then_some(theme_inst)).collect();
         let mut rng = self.rng("melody");
-        let cfg = MelodyCfg {
+        let mut cfg = MelodyCfg {
             lo: 9,
             hi: 17,
             patterns: PAT_SLOW_44,
@@ -927,6 +1102,7 @@ impl<'a> Ctx<'a> {
             rest_bar_prob: 0.0,
             ornaments: false,
         };
+        self.vary_melody(&mut cfg);
         let m = self.melody(&mut rng, &cfg, &insts);
         // Double the theme an octave down at the climax.
         let climax: Vec<Note> = m
@@ -943,13 +1119,20 @@ impl<'a> Ctx<'a> {
         let e = self.ppq / 2;
         let arp_inst = if self.piano { Inst::Piano } else { Inst::Pizzicato };
         let mut prev = Vec::new();
+        // the left hand's figure; from version 3 also one climbing through
+        // the octave, or a wide sweep over two octaves
+        let figure = self.variant("figure", 3);
         for b in 0..self.bars {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
             let start = b * self.bar;
             let low = self.scale.degree_near(self.bass_key(&chord, 36));
             let third = if matches!(chord.ext, Ext::Sus4) { 3 } else if matches!(chord.ext, Ext::Sus2) { 1 } else { 2 };
-            let offs = [0, 4, 7 + third, 11, 7 + third, 4];
+            let offs = match figure {
+                1 => [0, 4, 7, 7 + third, 11, 7 + third],
+                2 => [0, 7, 7 + third, 14, 7 + third, 7],
+                _ => [0, 4, 7 + third, 11, 7 + third, 4],
+            };
             let full = self.full(b);
             for (i, o) in offs.iter().enumerate() {
                 // sparse: bass, the top of the arpeggio and the turn back
@@ -987,7 +1170,7 @@ impl<'a> Ctx<'a> {
             .map(|b| (b >= 1 && b + 1 < self.bars).then_some(mel_inst))
             .collect();
         let mut rng = self.rng("melody");
-        let cfg = MelodyCfg {
+        let mut cfg = MelodyCfg {
             lo: 7,
             hi: 17,
             patterns: PAT_68,
@@ -996,6 +1179,7 @@ impl<'a> Ctx<'a> {
             rest_bar_prob: 0.15 * (1.0 - self.p.density as f64),
             ornaments: true,
         };
+        self.vary_melody(&mut cfg);
         let m = self.melody(&mut rng, &cfg, &insts);
         self.notes.extend(m);
     }
@@ -1033,8 +1217,19 @@ impl<'a> Ctx<'a> {
 
         // The melody: phrases that walk stepwise back to a centre note, each pair
         // (one from above, one from below) a step longer, then shorter again.
-        let unit = if d > 0.65 { self.bar / 2 } else { self.bar };
-        let units = (self.bars * self.bar / unit) as usize;
+        // from version 3 the bells may fall instead of rise, or take the
+        // triad tone above the melody (Pärt's "superior" position), and the
+        // melody may move at half speed
+        let bells = self.variant("bells", 3);
+        let slow = self.variant("pace", 2) == 1 && d <= 0.65;
+        let unit = if d > 0.65 {
+            self.bar / 2
+        } else if slow {
+            2 * self.bar
+        } else {
+            self.bar
+        };
+        let units = (self.bars * self.bar).div_ceil(unit) as usize;
         let centre = if rng.chance(0.5) { 7 } else { 4 };
         let longest = 3 + (v * 4.0).round() as i32;
         let mut mel: Vec<Option<i32>> = Vec::new();
@@ -1080,8 +1275,9 @@ impl<'a> Ctx<'a> {
             }
             // The bells: a rising triad figure ending on the triad tone just
             // below the melody, a crotchet at a time.
-            let top = self.triad_tone(current, true) - 7;
+            let top = self.triad_tone(current, bells != 2) - 7;
             let fig = [self.triad_tone(self.triad_tone(top, true), true), self.triad_tone(top, true), top];
+            let fig = if bells == 1 { [fig[2], fig[1], fig[0]] } else { fig };
             // sparse: a bell every other beat; busy: quavers at the fuller moments
             let step = if d < 0.3 {
                 2 * beat
@@ -1100,11 +1296,12 @@ impl<'a> Ctx<'a> {
             if start % self.bar == 0 {
                 let mirror = self.triad_tone(centre - (current - centre) + 1, true) - 14;
                 let key = self.scale.midi(mirror);
+                let len = self.bar.max(unit);
                 if self.piano {
-                    self.note(Inst::Piano, start, self.bar, key, 36.0 + 14.0 * it);
+                    self.note(Inst::Piano, start, len, key, 36.0 + 14.0 * it);
                 }
                 if self.strings && (!self.piano || self.full(b) > 0.6) {
-                    self.note(Inst::Cello, start, self.bar + beat / 4, key, 34.0 + 26.0 * it);
+                    self.note(Inst::Cello, start, len + beat / 4, key, 34.0 + 26.0 * it);
                 }
             }
         }
@@ -1128,9 +1325,14 @@ impl<'a> Ctx<'a> {
         let mut rng = self.rng("chorale");
         let v = self.p.variation as f64;
         let half = self.bar / 2;
-        let phrase = 4;
+        // from version 3 the chorale may breathe every two bars
+        let phrase = if self.variant("phrase", 2) == 1 { 2 } else { 4 };
+        // from version 3: the piano may roll its chords like a harp, or the
+        // whole chorale sit higher, lighter, like trebles
+        let texture = self.variant("texture", 3);
+        let (vlo, vhi, blo) = if texture == 2 { (60, 79, 45) } else { (55, 74, 38) };
         let mut prev: Vec<i32> = Vec::new();
-        let mut prev_bass = self.bass_key(&self.harmony[0], 38);
+        let mut prev_bass = self.bass_key(&self.harmony[0], blo);
         for b in 0..self.bars {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
@@ -1159,14 +1361,14 @@ impl<'a> Ctx<'a> {
                 let len = if phrase_end && off + dur == self.bar { dur - self.ppq / 3 } else { dur + self.ppq / 8 };
                 let mut pcs = c.pitch_classes(&self.scale);
                 pcs.truncate(4);
-                let voicing = voice_lead(&pcs, &prev, 55, 74, false);
+                let voicing = voice_lead(&pcs, &prev, vlo, vhi, false);
                 prev = voicing.clone();
                 // Bass: the root, unless the third or fifth moves more smoothly (an inversion).
-                let root = self.bass_key(&c, 38);
+                let root = self.bass_key(&c, blo);
                 let mut bass = root;
                 if !phrase_end {
                     for o in [2, 4] {
-                        let k = self.bass_key(&Chord::new(c.root + o, Ext::Triad), 38);
+                        let k = self.bass_key(&Chord::new(c.root + o, Ext::Triad), blo);
                         if (k - prev_bass).abs() + 3 < (bass - prev_bass).abs() {
                             bass = k;
                         }
@@ -1178,9 +1380,9 @@ impl<'a> Ctx<'a> {
                 // busy: over a whole-bar chord the bass steps to another chord tone on beat 3
                 let walk = self.density() > 0.65 && dur == self.bar && !phrase_end;
                 let bass_notes: Vec<(u32, u32, i32)> = if walk {
-                    let mut other = self.bass_key(&Chord::new(c.root + 4, Ext::Triad), 38);
+                    let mut other = self.bass_key(&Chord::new(c.root + 4, Ext::Triad), blo);
                     if other == bass {
-                        other = self.bass_key(&Chord::new(c.root + 2, Ext::Triad), 38);
+                        other = self.bass_key(&Chord::new(c.root + 2, Ext::Triad), blo);
                     }
                     vec![(0, half, bass), (half, len - half, other)]
                 } else {
@@ -1198,9 +1400,12 @@ impl<'a> Ctx<'a> {
                 // sparse: with strings, the piano leaves the chorale to them
                 if self.piano && (!self.strings || self.density() >= 0.3) {
                     let soft = if self.strings { 0.7 } else { 1.0 };
-                    self.note(Inst::Piano, start, len, top, (vel + 6.0) * soft);
-                    for k in &inner {
-                        self.note(Inst::Piano, start, len, *k, (vel - 6.0) * soft);
+                    // rolled: from the bass up, a little apart
+                    let roll = if texture == 1 { self.ppq / 10 } else { 0 };
+                    let n = inner.len() as u32 + 1;
+                    self.note(Inst::Piano, start + n * roll, len - n * roll, top, (vel + 6.0) * soft);
+                    for (i, k) in inner.iter().enumerate() {
+                        self.note(Inst::Piano, start + (i as u32 + 1) * roll, len - (i as u32 + 1) * roll, *k, (vel - 6.0) * soft);
                     }
                     for &(o, l, k) in &bass_notes {
                         self.note(Inst::Piano, start + o, l, k, vel * soft);
@@ -1229,9 +1434,12 @@ impl<'a> Ctx<'a> {
         self.harmony[last] = Chord::new(0, Ext::Add9);
         self.section = vec![0; self.bars as usize];
 
-        // The bass: the root, then the chord's third, every bar.
+        // The bass: the root, then the chord's third, every bar. From version
+        // 3 it may walk in crotchets throughout, or swing between the root and
+        // the fifth below.
         let half = self.bar / 2;
         let bass_inst = if self.strings { Inst::Cello } else { Inst::Piano };
+        let bass_kind = self.variant("bass", 3);
         for b in 0..self.bars {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
@@ -1249,10 +1457,14 @@ impl<'a> Ctx<'a> {
                 third += 12;
             }
             let d = self.density();
-            if d < 0.3 {
+            if bass_kind == 2 && d >= 0.3 {
+                let below = if root - 5 >= 33 { root - 5 } else { root + 7 };
+                self.note(bass_inst, start, half + self.ppq / 8, root, 44.0 + 22.0 * it);
+                self.note(bass_inst, start + half, half + self.ppq / 8, below, 36.0 + 22.0 * it);
+            } else if d < 0.3 {
                 // sparse: one bass note a bar
                 self.note(bass_inst, start, self.bar + self.ppq / 8, root, 44.0 + 22.0 * it);
-            } else if d > 0.65 && self.full(b) > 0.5 {
+            } else if (d > 0.65 && self.full(b) > 0.5) || (bass_kind == 1 && self.full(b) > 0.3) {
                 // busy: a crotchet bass through the chord
                 let mut fifth = self.scale.midi(chord.root + 4);
                 while fifth > root + 8 {
@@ -1299,11 +1511,17 @@ impl<'a> Ctx<'a> {
         let cfg = MelodyCfg {
             lo: 7,
             hi: 14,
-            patterns: if d > 0.5 { PAT_MOVING_44 } else { PAT_SLOW_44 },
+            // from version 3 the line may move more, with grace notes, or less
+            patterns: match self.variant("line", 3) {
+                1 => PAT_MOVING_44,
+                2 => PAT_SLOW_44,
+                _ if d > 0.5 => PAT_MOVING_44,
+                _ => PAT_SLOW_44,
+            },
             phrase_bars: gl,
             vel: 50.0,
             rest_bar_prob: 0.0,
-            ornaments: false,
+            ornaments: self.variant("line", 3) == 1,
         };
         let line = self.melody(&mut rng, &cfg, &insts);
         let end = last as u32 * self.bar;
@@ -1331,7 +1549,11 @@ impl<'a> Ctx<'a> {
         let hr = 4;
         self.plan_harmony(hr, [0.1, 0.4, 0.0, 0.0, 0.35, 0.15], &[&[0, 3, 0, 4], &[0, 5, 0, 3]]);
         let tonic = self.bass_key(&Chord::new(0, Ext::Triad), 36);
-        let wave = 4 * self.bar;
+        // from version 3: slower tides, an octave above the drone, the fifth
+        // entering a bar after the tonic, and bells that ring in pairs
+        let wave = if self.variant("tide", 2) == 1 { 8 * self.bar } else { 4 * self.bar };
+        let drone = self.variant("drone", 3);
+        let pairs = self.variant("bells", 2) == 1;
 
         // The drone: tonic and fifth, renewed every eight bars, overlapping.
         let mut b = 0;
@@ -1341,7 +1563,11 @@ impl<'a> Ctx<'a> {
             let span = (8.min(self.bars - b)) * self.bar;
             if self.strings {
                 self.note(Inst::Cello, start, span + self.bar / 2, tonic, 34.0 + 24.0 * it);
-                self.note(Inst::Cello, start, span + self.bar / 2, tonic + 7, 28.0 + 20.0 * it);
+                let late = if drone == 2 { self.bar.min(span / 2) } else { 0 };
+                self.note(Inst::Cello, start + late, span - late + self.bar / 2, tonic + 7, 28.0 + 20.0 * it);
+                if drone == 1 {
+                    self.note(Inst::Cello, start, span + self.bar / 2, tonic + 12, 22.0 + 18.0 * it);
+                }
             } else {
                 for k in (0..span).step_by((2 * self.bar) as usize) {
                     self.note(Inst::Piano, start + k, 2 * self.bar, tonic, 30.0 + 12.0 * it);
@@ -1406,7 +1632,16 @@ impl<'a> Ctx<'a> {
                     deg += 1;
                 }
                 let dur = rng.range(3, 6) as u32 * self.ppq;
-                self.note(bell, pos, dur, self.scale.midi(deg), 22.0 + 24.0 * it + rng.gauss() * 3.0);
+                let vel = 22.0 + 24.0 * it + rng.gauss() * 3.0;
+                self.note(bell, pos, dur, self.scale.midi(deg), vel);
+                if pairs {
+                    // the next chord tone up answers it
+                    let mut up = deg + 1;
+                    while !chord.contains(up) {
+                        up += 1;
+                    }
+                    self.note(bell, pos + self.ppq / 2, dur, self.scale.midi(up), vel * 0.8);
+                }
             }
         }
     }
@@ -1423,7 +1658,13 @@ impl<'a> Ctx<'a> {
         let e = self.ppq / 2;
         // Comping rhythms in eighths (onset, length), one for each section.
         const COMP: [&[(u32, u32)]; 4] = [&[(0, 6), (6, 2)], &[(0, 3), (3, 5)], &[(0, 4), (5, 3)], &[(0, 8)]];
+        // from version 3, other comping: a 3-3-2 lilt, a soft chord just
+        // after the beat, and pushes on beats 2 and 4
+        const MORE: [&[(u32, u32)]; 4] = [&[(0, 3), (3, 3), (6, 2)], &[(1, 3), (4, 4)], &[(0, 2), (2, 4), (6, 2)], &[(0, 4), (4, 4)]];
         let sec_comp = [rng.range(0, 3) as usize, rng.range(0, 3) as usize, rng.range(0, 3) as usize];
+        let comps = if self.variant("comp", 2) == 1 { MORE } else { COMP };
+        // and the left hand may walk into the next chord
+        let walk = self.variant("bass", 2) == 1;
         let mut prev = Vec::new();
         for b in 0..self.bars {
             let chord = self.harmony[b as usize].clone();
@@ -1444,20 +1685,32 @@ impl<'a> Ctx<'a> {
                 &[(0, 8)]
             } else if self.density() > 0.65 && full > 0.5 {
                 // busy: an extra push on the last quaver
-                match COMP[sec_comp[self.section[b as usize] as usize]] {
+                match comps[sec_comp[self.section[b as usize] as usize]] {
                     [(0, 8)] => &[(0, 4), (4, 3), (7, 1)],
                     [(0, 6), (6, 2)] => &[(0, 3), (3, 3), (6, 2)],
                     [(0, 3), (3, 5)] => &[(0, 3), (3, 4), (7, 1)],
-                    _ => &[(0, 4), (5, 2), (7, 1)],
+                    [(0, 4), (5, 3)] => &[(0, 4), (5, 2), (7, 1)],
+                    other => other,
                 }
             } else {
-                COMP[sec_comp[self.section[b as usize] as usize]]
+                comps[sec_comp[self.section[b as usize] as usize]]
             };
-            if self.piano {
+            if self.piano && walk && !last {
+                // root, fifth, then a scale step leading to the next root
+                let to = self.bass_key(&next, 36);
+                let approach = self.scale.midi(self.scale.degree_near(if to >= bass { to - 1 } else { to + 1 }));
+                let fifth = if bass + 7 > 52 { bass - 5 } else { bass + 7 };
+                self.note(Inst::Piano, start, 4 * e, bass, 40.0 + 14.0 * it);
+                self.note(Inst::Piano, start + 4 * e, 2 * e, fifth, 32.0 + 10.0 * it);
+                let lead = if approach == to { fifth } else { approach };
+                self.note(Inst::Piano, start + 6 * e, 2 * e, lead, 30.0 + 10.0 * it);
+            } else if self.piano {
                 self.note(Inst::Piano, start, self.bar, bass, 40.0 + 14.0 * it);
                 if !last && rng.chance(0.3 + 0.4 * v) {
                     self.note(Inst::Piano, start + 4 * e, 4 * e, bass + 7, 32.0 + 10.0 * it);
                 }
+            }
+            if self.piano {
                 for (on, dur) in comp {
                     for (i, k) in voicing.iter().enumerate() {
                         let roll = i as u32 * self.ppq / 24;
@@ -1502,7 +1755,7 @@ impl<'a> Ctx<'a> {
         let insts: Vec<Option<Inst>> =
             (0..self.bars).map(|b| (b >= 1 && b + 1 < self.bars).then_some(mel_inst)).collect();
         let mut rng = self.rng("melody");
-        let cfg = MelodyCfg {
+        let mut cfg = MelodyCfg {
             lo: 7,
             hi: 15,
             patterns: PAT_MOVING_44,
@@ -1511,9 +1764,15 @@ impl<'a> Ctx<'a> {
             rest_bar_prob: 0.1 + 0.3 * (1.0 - self.p.density as f64),
             ornaments: true,
         };
+        self.vary_melody(&mut cfg);
         let mut m = self.melody(&mut rng, &cfg, &insts);
-        // Swing the off-beat eighths a little.
-        let lag = self.ppq / 6;
+        // Swing the off-beat eighths a little (from version 3: straight, or a
+        // lazier swing).
+        let lag = match self.variant("swing", 3) {
+            1 => 0,
+            2 => self.ppq / 4,
+            _ => self.ppq / 6,
+        };
         for n in m.iter_mut() {
             if n.start % self.ppq == e {
                 n.start += lag;
@@ -1546,9 +1805,22 @@ impl<'a> Ctx<'a> {
             [0, 0, 7, 0, 4, 0, 9, 0, 0, 0, 7, 0, 11, 0, 9, 7],
             [0, 2, 4, 7, 4, 2, 0, 7, 0, 2, 4, 9, 7, 4, 2, 4],
         ];
+        // from version 3, other sequences: rising and falling scales, a
+        // pumping octave figure and a gated chord
+        const MORE: [[i32; 16]; 4] = [
+            [0, 2, 4, 7, 9, 11, 9, 7, 4, 2, 0, 2, 4, 7, 4, 2],
+            [0, 7, 0, 7, 4, 11, 4, 11, 2, 9, 2, 9, 4, 11, 4, 7],
+            [0, 4, 7, 11, 14, 11, 7, 4, 0, 4, 7, 11, 9, 7, 4, 2],
+            [0, 0, 4, 4, 7, 7, 4, 4, 0, 0, 9, 9, 7, 7, 4, 4],
+        ];
         let sec_pat = [rng.range(0, 3) as usize, rng.range(0, 3) as usize, rng.range(0, 3) as usize];
         let seq_inst = if self.strings { Inst::Pizzicato } else { Inst::Piano };
-        let mut pattern = PATTERNS[sec_pat[0]];
+        let patterns = if self.variant("sequence", 2) == 1 { MORE } else { PATTERNS };
+        // and the sequence may loop every 12 steps against the 16-step bar,
+        // so it shifts against the beat as it goes round
+        let loop_len = if self.variant("loop", 3) == 2 { 12 } else { 16 };
+        let bass_kind = self.variant("bass", 3);
+        let mut pattern = patterns[sec_pat[0]];
         let mut last_sec = 0;
         let mut prev = Vec::new();
         for b in 0..self.bars {
@@ -1558,7 +1830,7 @@ impl<'a> Ctx<'a> {
             let start = b * self.bar;
             let sec = self.section[b as usize] as usize;
             if sec != last_sec {
-                pattern = PATTERNS[sec_pat[sec % 3]];
+                pattern = patterns[sec_pat[sec % 3]];
                 last_sec = sec;
             }
             // the pattern mutates slowly: now and then one step changes
@@ -1576,7 +1848,8 @@ impl<'a> Ctx<'a> {
                 if i > 0 && rng.chance(0.3 * (1.0 - d) * (1.0 - it)) {
                     continue;
                 }
-                let off = match pattern[i] {
+                let idx = if loop_len == 16 { i } else { (b as usize * 16 + i) % loop_len };
+                let off = match pattern[idx] {
                     2 => third,
                     9 => 7 + third,
                     o => o,
@@ -1595,7 +1868,20 @@ impl<'a> Ctx<'a> {
             // The bass: a pedal on the chord's root, pulsing in quavers when busy.
             let bass = self.bass_key(&chord, 33);
             let bass_inst = if self.strings { Inst::Cello } else { Inst::Piano };
-            if d > 0.65 && full > 0.5 && !last {
+            if bass_kind == 1 && full > 0.4 && !last {
+                // octave-jumping quavers
+                for i in 0..8u32 {
+                    let k = if i % 2 == 0 { bass } else { bass + 12 };
+                    let vel = 36.0 + 22.0 * it + if i % 2 == 0 { 6.0 } else { 0.0 };
+                    self.note(bass_inst, start + i * 2 * s16, 2 * s16, k, vel);
+                }
+            } else if bass_kind == 2 && !last {
+                // a long pedal, held across each pair of bars
+                if b % 2 == 0 {
+                    let span = 2.min(self.bars - 1 - b).max(1) * self.bar;
+                    self.note(bass_inst, start, span + s16, bass, 40.0 + 26.0 * it);
+                }
+            } else if d > 0.65 && full > 0.5 && !last {
                 for i in 0..8u32 {
                     let vel = 38.0 + 22.0 * it + if i % 2 == 0 { 6.0 } else { 0.0 };
                     self.note(bass_inst, start + i * 2 * s16, 2 * s16, bass, vel);
@@ -1633,7 +1919,7 @@ impl<'a> Ctx<'a> {
         if self.strings {
             let insts: Vec<Option<Inst>> = (0..self.bars).map(|b| (self.full(b) > 0.55).then_some(Inst::Violin)).collect();
             let mut rng = self.rng("melody");
-            let cfg = MelodyCfg {
+            let mut cfg = MelodyCfg {
                 lo: 9,
                 hi: 16,
                 patterns: PAT_SLOW_44,
@@ -1642,6 +1928,7 @@ impl<'a> Ctx<'a> {
                 rest_bar_prob: 0.3,
                 ornaments: false,
             };
+            self.vary_melody(&mut cfg);
             let m = self.melody(&mut rng, &cfg, &insts);
             self.notes.extend(m);
         }
@@ -1654,7 +1941,18 @@ impl<'a> Ctx<'a> {
         let mut rng = self.rng("stabs");
         // Stab rhythms in semiquavers from the start of the bar, one for each section.
         const RHYTHMS: [&[u32]; 4] = [&[6, 14], &[2, 10], &[6, 11, 14], &[3, 6, 14]];
+        // from version 3 also a skank on every off-beat, and sparser stabs
+        const MORE: [&[u32]; 4] = [&[2, 6, 10, 14], &[4, 12], &[6, 9, 14], &[2, 7, 14]];
         let sec_r = [rng.range(0, 3) as usize, rng.range(0, 3) as usize, rng.range(0, 3) as usize];
+        let rhythms = if self.variant("stabs", 2) == 1 { MORE } else { RHYTHMS };
+        // the echo: dotted quavers, quavers, or crotchets
+        let echo = match self.variant("echo", 3) {
+            1 => 2 * s16,
+            2 => 4 * s16,
+            _ => 3 * s16,
+        };
+        // and the bass may play a line rather than a pulse
+        let line = self.variant("bass", 2) == 1;
         let stab_inst = if self.piano { Inst::Piano } else { Inst::Pizzicato };
         let end = self.bars * self.bar;
         let mut prev = Vec::new();
@@ -1672,7 +1970,7 @@ impl<'a> Ctx<'a> {
             }
             let voicing = voice_lead(&pcs, &prev, 55, 72, false);
             prev = voicing.clone();
-            let rhythm = RHYTHMS[sec_r[self.section[b as usize] as usize % 3]];
+            let rhythm = rhythms[sec_r[self.section[b as usize] as usize % 3]];
             let hits: &[u32] = if last {
                 &[0]
             } else if d < 0.3 {
@@ -1698,18 +1996,28 @@ impl<'a> Ctx<'a> {
                     } else {
                         vel *= 0.6;
                     }
-                    t += 3 * s16;
+                    t += echo;
                 }
             }
 
             // The sub bass: the root on the beat, and a push before beat 4.
             let bass = self.bass_key(&chord, 31);
+            let mut bass_line_played = false;
             let bass_inst = if self.strings { Inst::Cello } else { Inst::Piano };
-            self.note(bass_inst, start, 6 * s16, bass, 46.0 + 22.0 * it);
-            if !last && d >= 0.3 {
+            if line && !last && d >= 0.3 {
+                let fifth = if bass + 7 > 50 { bass - 5 } else { bass + 7 };
+                for (on, len, k) in [(0, 5, bass), (6, 2, bass), (8, 3, fifth), (12, 2, bass + 12), (14, 2, fifth)] {
+                    let accent = if on == 0 { 8.0 } else { 0.0 };
+                    self.note(bass_inst, start + on * s16, len * s16, k, 38.0 + 22.0 * it + accent);
+                }
+                bass_line_played = true;
+            } else {
+                self.note(bass_inst, start, 6 * s16, bass, 46.0 + 22.0 * it);
+            }
+            if !bass_line_played && !last && d >= 0.3 {
                 self.note(bass_inst, start + 10 * s16, 4 * s16, bass, 38.0 + 20.0 * it);
             }
-            if !last && d > 0.65 && full > 0.5 {
+            if !bass_line_played && !last && d > 0.65 && full > 0.5 {
                 self.note(bass_inst, start + 14 * s16, 2 * s16, bass + 7, 32.0 + 18.0 * it);
             }
 
@@ -1745,6 +2053,10 @@ impl<'a> Ctx<'a> {
         let mut rng = self.rng("aurora");
         let mut prev = Vec::new();
         let pad_inst = if self.strings { Inst::StringPad } else { Inst::Piano };
+        // from version 3 the cluster may bloom from the top down, or from the
+        // middle outwards; and the glow may sway between two notes
+        let bloom = self.variant("bloom", 3);
+        let sway = self.variant("glow", 2) == 1;
         for b in (0..self.bars).step_by(hr as usize) {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
@@ -1756,8 +2068,14 @@ impl<'a> Ctx<'a> {
             // The cluster blooms: its notes enter one by one, lowest first, and fade together.
             let voicing = self.thin(voicing);
             let gap = beat / 2 + rng.range(0, 2) as u32 * beat / 4;
+            let n = voicing.len();
             for (i, k) in voicing.iter().enumerate() {
-                let delay = (i as u32 * gap).min(span / 2);
+                let order = match bloom {
+                    1 => n - 1 - i,
+                    2 => (2 * i as i32 - n as i32 + 1).unsigned_abs() as usize / 2,
+                    _ => i,
+                };
+                let delay = (order as u32 * gap).min(span / 2);
                 let vel = if pad_inst == Inst::Piano { 30.0 + 24.0 * it } else { 40.0 + 40.0 * it };
                 self.note(pad_inst, start + delay, span - delay + self.bar / 2, *k, vel);
             }
@@ -1770,7 +2088,17 @@ impl<'a> Ctx<'a> {
                 while k > 88 {
                     k -= 12;
                 }
-                self.note(Inst::Violin, start + self.bar, span - self.bar + beat, k, 32.0 + 32.0 * it);
+                if sway {
+                    // the ninth and the fifth below it in turn, a bar each
+                    let fifth = self.scale.midi(chord.root + 4 + 7);
+                    let fifth = if fifth > k { fifth - 12 } else { fifth };
+                    for (n, bb) in (1..span / self.bar).enumerate() {
+                        let key = if n % 2 == 0 { k } else { fifth };
+                        self.note(Inst::Violin, start + bb * self.bar, self.bar + beat / 2, key, 30.0 + 30.0 * it);
+                    }
+                } else {
+                    self.note(Inst::Violin, start + self.bar, span - self.bar + beat, k, 32.0 + 32.0 * it);
+                }
                 self.swell(Inst::Violin, start + self.bar, span - self.bar, 40.0, 85.0 + 25.0 * it, 45.0);
             }
             // The drone: the chord's root, low and quiet.
@@ -1810,6 +2138,9 @@ impl<'a> Ctx<'a> {
         // With strings, a harp rocks under the music box; otherwise the piano does.
         let rock = if self.strings { Inst::Pizzicato } else { Inst::Piano };
         let mut prev = Vec::new();
+        // from version 3 the rocking may be a broken chord throughout, or a
+        // barcarolle lilt: a long bass, then the chord on the third beat
+        let rocking = self.variant("rock", 3);
         for b in 0..self.bars {
             let chord = self.harmony[b as usize].clone();
             let it = self.it(b);
@@ -1823,7 +2154,13 @@ impl<'a> Ctx<'a> {
                 self.note(rock, start + e / 2, self.bar, self.scale.midi(low + 4), vel - 6.0);
                 continue;
             }
-            if d > 0.65 && full > 0.4 {
+            if rocking == 2 && d >= 0.3 {
+                self.note(rock, start, 2 * beat, self.scale.midi(low), vel + 2.0);
+                self.note(rock, start + beat, beat, self.scale.midi(low + 4), vel - 10.0);
+                for o in [7, 7 + third] {
+                    self.note(rock, start + 2 * beat, beat + e, self.scale.midi(low + o), vel - 6.0);
+                }
+            } else if (d > 0.65 && full > 0.4) || (rocking == 1 && full > 0.25) {
                 // busy: a broken chord rocking in quavers
                 for (i, o) in [0, 4, 7, 7 + third, 7, 4].iter().enumerate() {
                     let v = if i == 0 { vel + 4.0 } else { vel - 6.0 };
@@ -1857,7 +2194,7 @@ impl<'a> Ctx<'a> {
         let mel_inst = if self.piano { Inst::Piano } else { Inst::Violin };
         let insts: Vec<Option<Inst>> = (0..self.bars).map(|b| (b >= 2 && b + 1 < self.bars).then_some(mel_inst)).collect();
         let mut rng = self.rng("melody");
-        let cfg = MelodyCfg {
+        let mut cfg = MelodyCfg {
             lo: 9,
             hi: 16,
             patterns: PAT_WALTZ,
@@ -1866,6 +2203,7 @@ impl<'a> Ctx<'a> {
             rest_bar_prob: 0.05 + 0.3 * (1.0 - d),
             ornaments: false,
         };
+        self.vary_melody(&mut cfg);
         let m = self.melody(&mut rng, &cfg, &insts);
         self.notes.extend(m);
     }
@@ -1899,6 +2237,13 @@ impl<'a> Ctx<'a> {
         const ROLLS: [[i32; 6]; 3] = [[0, 4, 7, 9, 7, 4], [0, 4, 7, 11, 9, 7], [0, 7, 9, 4, 7, 11]];
         let sec_roll = [rng.range(0, 2) as usize, rng.range(0, 2) as usize, rng.range(0, 2) as usize];
         let harp = if self.strings { Inst::Pizzicato } else { Inst::Piano };
+        // from version 3: other rolls, rocking low or turning back down; the
+        // harp in a lilting crotchet-quaver rhythm; and the low strings may
+        // follow the chords, or hold a high drone like pipes
+        const MORE: [[i32; 6]; 3] = [[0, 4, 7, 4, 0, 4], [0, 7, 11, 9, 7, 4], [0, 4, 9, 7, 4, 0]];
+        let roll_kind = self.variant("roll", 3);
+        let rolls = if roll_kind == 1 { MORE } else { ROLLS };
+        let drone_kind = self.variant("drone", 3);
         let mut prev = Vec::new();
         for b in 0..self.bars {
             let chord = self.harmony[b as usize].clone();
@@ -1917,19 +2262,29 @@ impl<'a> Ctx<'a> {
                 self.note(harp, start, 3 * e, self.scale.midi(low), vel);
                 self.note(harp, start + 3 * e, 3 * e, self.scale.midi(low + 7 + third), vel - 8.0);
             } else {
-                let roll = ROLLS[sec_roll[self.section[b as usize] as usize % 3]];
+                let roll = rolls[sec_roll[self.section[b as usize] as usize % 3]];
                 for (i, o) in roll.iter().enumerate() {
+                    // the lilt: crotchet, quaver, crotchet, quaver
+                    if roll_kind == 2 && (i == 1 || i == 4) {
+                        continue;
+                    }
                     let o = if *o == 9 || *o == 2 { o - 2 + third } else { *o };
                     let v = if i % 3 == 0 { vel + 4.0 } else { vel - 6.0 };
                     self.note(harp, start + i as u32 * e, 3 * e, self.scale.midi(low + o), v);
                 }
             }
             // the drone: the tonic, and its fifth when the music fills out
-            if self.strings && b % 2 == 0 {
+            if self.strings && drone_kind == 1 {
+                if b % hr == 0 {
+                    let span = hr.min(self.bars - b) * self.bar;
+                    self.note(Inst::Cello, start, span, self.bass_key(&chord, 36), 30.0 + 18.0 * it);
+                }
+            } else if self.strings && b % 2 == 0 {
                 let span = 2.min(self.bars - b) * self.bar;
                 let tonic = self.bass_key(&crate::theory::Chord::new(0, Ext::Triad), 38);
+                let tonic = if drone_kind == 2 { tonic + 12 } else { tonic };
                 self.note(Inst::Cello, start, span, tonic, 30.0 + 18.0 * it);
-                if full > 0.55 {
+                if full > 0.55 || drone_kind == 2 {
                     self.note(Inst::Cello, start, span, tonic + 7, 24.0 + 14.0 * it);
                 }
             }
@@ -1946,7 +2301,7 @@ impl<'a> Ctx<'a> {
             .map(|b| (b >= 2 && b + 1 < self.bars && self.full(b) > 0.2).then_some(lead))
             .collect();
         let mut rng = self.rng("melody");
-        let cfg = MelodyCfg {
+        let mut cfg = MelodyCfg {
             lo: 7,
             hi: 15,
             patterns: PAT_68,
@@ -1955,6 +2310,7 @@ impl<'a> Ctx<'a> {
             rest_bar_prob: 0.1,
             ornaments: true,
         };
+        self.vary_melody(&mut cfg);
         let m = self.melody(&mut rng, &cfg, &insts);
         // more grace notes than the other styles: a cut from above before long notes
         let mut graces = Vec::new();
@@ -1986,6 +2342,11 @@ impl<'a> Ctx<'a> {
         let v = self.p.variation as f64;
         let koto = if self.piano { Inst::Piano } else { Inst::Pizzicato };
         let mut rng = self.rng("koto");
+        // from version 3: rising sweeps among the gestures, or a sparer,
+        // meditative player; and the low fifth only every other phrase
+        let player = self.variant("player", 3);
+        let open_every = if self.variant("drone", 2) == 1 { 2 } else { 1 };
+        let mut phrase = 0;
         let mut b = 0;
         while b < self.bars {
             let len = 2.min(self.bars - b);
@@ -1995,23 +2356,35 @@ impl<'a> Ctx<'a> {
             let last = b + len >= self.bars;
             // a low open fifth on the tonic begins each phrase
             let root = self.scale.midi(-7);
-            self.note(koto, start, len * self.bar, root, 34.0 + 16.0 * it);
-            if d > 0.35 {
-                self.note(koto, start + s16, len * self.bar, root + 7, 28.0 + 14.0 * it);
+            if phrase % open_every == 0 || last {
+                self.note(koto, start, len * self.bar, root, 34.0 + 16.0 * it);
+                if d > 0.35 {
+                    self.note(koto, start + s16, len * self.bar, root + 7, 28.0 + 14.0 * it);
+                }
+            } else {
+                // a single low note marks the phrase instead
+                self.note(koto, start, len * self.bar, root + 7, 26.0 + 12.0 * it);
             }
+            phrase += 1;
             if last {
                 self.note(koto, start + e, self.bar, self.scale.midi(Self::snap_to(4, &SET)), 34.0);
                 break;
             }
             let mut t = start + rng.range(1, 4) as u32 * e;
-            let gestures = 1 + rng.poisson(0.4 + 2.6 * d * it);
+            let gestures = if player == 2 { 1 + rng.poisson(0.2 + 1.2 * d * it) } else { 1 + rng.poisson(0.4 + 2.6 * d * it) };
             for _ in 0..gestures {
                 if t + beat >= end {
                     break;
                 }
                 let vel = 40.0 + 22.0 * it + rng.gauss() * 3.0;
                 let deg = Self::snap_to(rng.range(6, 13), &SET);
-                match rng.weighted(&[3.0, 2.0, 0.6 + v]) {
+                let weights = match player {
+                    1 => [2.0, 1.5, 0.4 + v, 2.0],
+                    2 => [5.0, 1.0, 0.3 + v * 0.5, 0.0],
+                    _ => [3.0, 2.0, 0.6 + v, 0.0],
+                };
+                let pick = if player == 0 { rng.weighted(&weights[..3]) } else { rng.weighted(&weights) };
+                match pick {
                     // a single pluck, often pulled into from the note above
                     0 => {
                         if rng.chance(0.45) {
@@ -2020,6 +2393,9 @@ impl<'a> Ctx<'a> {
                         }
                         self.note(koto, t, 3 * beat, self.scale.midi(deg), vel);
                         t += rng.range(3, 6) as u32 * e;
+                        if player == 2 {
+                            t += rng.range(2, 4) as u32 * e;
+                        }
                     }
                     // a falling run, quickening
                     1 => {
@@ -2033,6 +2409,20 @@ impl<'a> Ctx<'a> {
                             dd = Self::step_in(dd, &SET, -1);
                         }
                         t += rng.range(3, 5) as u32 * e;
+                    }
+                    // a rising sweep across the strings onto a long note
+                    3 => {
+                        let mut dd = Self::step_in(deg, &SET, -1);
+                        for _ in 0..3 {
+                            dd = Self::step_in(dd, &SET, -1);
+                        }
+                        for i in 0..4 {
+                            self.note(koto, t + i * s16 / 2, s16, self.scale.midi(dd), vel - 12.0 + i as f64 * 2.0);
+                            dd = Self::step_in(dd, &SET, 1);
+                        }
+                        t += 2 * s16;
+                        self.note(koto, t, 3 * beat, self.scale.midi(dd), vel + 2.0);
+                        t += rng.range(4, 7) as u32 * e;
                     }
                     // tremolo on one note, swelling and dying away
                     _ => {
@@ -2102,7 +2492,8 @@ impl<'a> Ctx<'a> {
         let d = self.density();
         let v = self.p.variation as f64;
         let mut rng = self.rng("balungan");
-        let cycle_bars = 4u32;
+        // from version 3 the gong may close eight-bar cycles instead of four
+        let cycle_bars = if self.variant("cycle", 2) == 1 { 8u32 } else { 4u32 };
         let beats_per_cycle = cycle_bars * 4;
         // The core melody: one note a beat over a four-bar cycle, ending on the tonic.
         let new_cycle = |rng: &mut Rng| -> Vec<i32> {
@@ -2128,6 +2519,11 @@ impl<'a> Ctx<'a> {
         // Elaborations leading into each core note, as steps in the scale from
         // it, for the three sixteenths before the beat.
         const FIGURES: [[i32; 3]; 5] = [[1, 0, 1], [-1, 0, -1], [0, 1, -1], [2, 1, -1], [1, 2, 1]];
+        // from version 3, other elaborations, or two parts interlocking (imbal):
+        // one on the beat's off-sixteenths above, the other between, below
+        const MORE: [[i32; 3]; 5] = [[-1, 1, 0], [2, 0, 1], [-2, -1, 1], [1, -1, 1], [0, 2, 1]];
+        let figure = self.variant("figure", 3);
+        let figures = if figure == 1 { MORE } else { FIGURES };
         let sec_fig = [rng.range(0, 4) as usize, rng.range(0, 4) as usize, rng.range(0, 4) as usize];
         let core = if self.piano { Inst::Piano } else { Inst::Pizzicato };
         let total_beats = self.bars * 4;
@@ -2157,8 +2553,20 @@ impl<'a> Ctx<'a> {
                 continue;
             }
             // interlocking figures, an octave up, once the music fills out
-            if self.strings && full > 0.35 {
-                let fig = FIGURES[sec_fig[self.section[b as usize] as usize % 3]];
+            if self.strings && full > 0.35 && figure == 2 {
+                let next = cycle[((c + 1) % beats_per_cycle) as usize];
+                let dense = d > 0.55 && full > 0.6;
+                for k in 0..4u32 {
+                    if !dense && k % 2 == 0 {
+                        continue;
+                    }
+                    let mut deg = next + 5;
+                    deg = Self::step_in(deg, &set, if k % 2 == 1 { 1 } else { -1 });
+                    let vel = 30.0 + 22.0 * it + if k == 3 { 4.0 } else { 0.0 };
+                    self.note(Inst::Pizzicato, t + k * s16, s16 * 2, self.scale.midi(deg), vel);
+                }
+            } else if self.strings && full > 0.35 {
+                let fig = figures[sec_fig[self.section[b as usize] as usize % 3]];
                 let next = cycle[((c + 1) % beats_per_cycle) as usize];
                 let dense = d > 0.55 && full > 0.6;
                 for (k, off) in fig.iter().enumerate() {
@@ -2184,8 +2592,9 @@ impl<'a> Ctx<'a> {
             let span = cycle_bars.min(self.bars - b) * self.bar;
             let tonic = self.scale.midi(-14);
             self.note(Inst::Cello, b * self.bar, span, tonic, 46.0 + 20.0 * it);
-            if b + 2 < self.bars && self.full(b) > 0.4 {
-                self.note(Inst::Cello, (b + 2) * self.bar, 2 * self.bar, self.scale.midi(Self::snap_to(-10, &set)), 34.0 + 14.0 * it);
+            let mid = cycle_bars / 2;
+            if b + mid < self.bars && self.full(b) > 0.4 {
+                self.note(Inst::Cello, (b + mid) * self.bar, mid * self.bar, self.scale.midi(Self::snap_to(-10, &set)), 34.0 + 14.0 * it);
             }
             // a hazy drone under it
             if self.full(b) > 0.3 {
@@ -2231,7 +2640,17 @@ impl<'a> Ctx<'a> {
             &[(0, 2), (2, 1), (3, 0), (6, 1)],
             &[(0, 1), (1, 2), (3, 0), (5, 2), (6, 1)],
         ];
+        // from version 3, other picking patterns; and the thumb may keep to
+        // the root on every beat, or rock between root and octave
+        const MORE: [&[(u32, usize)]; 4] = [
+            &[(0, 2), (2, 0), (3, 1), (5, 0), (6, 2)],
+            &[(1, 1), (2, 2), (4, 0), (6, 1)],
+            &[(0, 0), (1, 1), (2, 2), (4, 1), (5, 0), (7, 1)],
+            &[(0, 2), (3, 1), (4, 2), (6, 0)],
+        ];
         let sec_pick = [rng.range(0, 3) as usize, rng.range(0, 3) as usize, rng.range(0, 3) as usize];
+        let picks_set = if self.variant("picks", 2) == 1 { MORE } else { PICKS };
+        let thumb = self.variant("thumb", 3);
         let guitar = if self.piano { Inst::Piano } else { Inst::Pizzicato };
         let mut prev = Vec::new();
         for b in 0..self.bars {
@@ -2255,14 +2674,19 @@ impl<'a> Ctx<'a> {
                 if d < 0.3 && k % 2 == 1 {
                     continue;
                 }
-                let o = if k % 2 == 0 { 0 } else { 4 };
-                let o = if k == 2 && rng.chance(0.3) { -3 } else { o };
+                let o = match thumb {
+                    1 => 0,
+                    2 if k % 2 == 1 => 7,
+                    _ if k % 2 == 0 => 0,
+                    _ => 4,
+                };
+                let o = if k == 2 && rng.chance(0.3) && thumb != 1 { -3 } else { o };
                 self.note(guitar, start + k * 2 * e, 2 * e, self.scale.midi(low + o), vel + if k == 0 { 4.0 } else { 0.0 });
             }
             let picks = if d < 0.3 || full < 0.2 {
                 &[(0, 2), (5, 0)][..]
             } else {
-                PICKS[sec_pick[self.section[b as usize] as usize % 3]]
+                picks_set[sec_pick[self.section[b as usize] as usize % 3]]
             };
             for &(slot, voice) in picks {
                 if slot > 0 && rng.chance(0.15 * (1.0 - d)) {
@@ -2286,7 +2710,7 @@ impl<'a> Ctx<'a> {
                 .map(|b| (b >= 4 && b + 1 < self.bars && self.full(b) > 0.5).then_some(Inst::Violin))
                 .collect();
             let mut rng = self.rng("melody");
-            let cfg = MelodyCfg {
+            let mut cfg = MelodyCfg {
                 lo: 9,
                 hi: 16,
                 patterns: PAT_SLOW_44,
@@ -2295,6 +2719,7 @@ impl<'a> Ctx<'a> {
                 rest_bar_prob: 0.25,
                 ornaments: false,
             };
+            self.vary_melody(&mut cfg);
             let m = self.melody(&mut rng, &cfg, &insts);
             self.notes.extend(m);
         }
@@ -2308,6 +2733,191 @@ impl<'a> Ctx<'a> {
     /// octave higher; elsewhere the tune may rest or rise, the accompaniment
     /// thin out, or the pad drop out. The first and last sections stay as the
     /// style wrote them.
+    /// In the spirit of Vangelis's Blade Runner: slow brass chords that swell
+    /// and sag in pitch in the breath at the end of each phrase (written as
+    /// expression; see `expression.rs`), a deep drone, a smoky lead, bells
+    /// falling like rain and, in some pieces, a slow pulse.
+    fn neon_noir(&mut self) {
+        let hr = 2;
+        self.plan_harmony(
+            hr,
+            [0.15, 0.3, 0.2, 0.1, 0.15, 0.1],
+            &[&[0, 5, 0, 5], &[0, 5, 3, 6], &[0, 3, 5, 6], &[5, 6, 0, 0]],
+        );
+        let beat = self.ppq;
+        let s16 = beat / 4;
+        let d = self.density();
+        let end = self.bars * self.bar;
+        // the brass: held swells, a bloom from the bottom up, or a chord
+        // struck afresh each bar, doubled an octave up at the peak
+        let brass = self.variant("brass", 3);
+        // the pulse: a heartbeat, a ticking ostinato, or none
+        let pulse = self.variant("pulse", 3);
+        // the lead: over the fuller stretches, answering in alternate
+        // phrases, or a few long, lonely notes
+        let lead = self.variant("lead", 3);
+        // the rain: scattered bells, or little falling figures
+        let rain = self.variant("rain", 2);
+        // the drone: a pedal on the tonic, or the chords' roots
+        let follow = self.variant("drone", 2) == 1;
+        let mut rng = self.rng("noir");
+        let mut prev = Vec::new();
+        let bass_inst = if self.strings { Inst::Cello } else { Inst::Piano };
+        for b in (0..self.bars).step_by(hr as usize) {
+            let chord = self.harmony[b as usize].clone();
+            let it = self.it(b);
+            let start = b * self.bar;
+            let span = hr.min(self.bars - b) * self.bar;
+            let last = b + hr >= self.bars;
+            // every fourth chord is cut short, leaving a breath for the sag
+            let breath = (b / hr) % 4 == 3 && !last;
+
+            let voicing = voice_lead(&chord.pitch_classes(&self.scale), &prev, 50, 74, false);
+            prev = voicing.clone();
+            let voicing = self.thin(voicing);
+            let len = if last {
+                span + self.bar
+            } else if breath {
+                span - beat - beat / 2
+            } else {
+                span + s16
+            };
+            let vel = 36.0 + 40.0 * it;
+            if self.strings {
+                let n = voicing.len() as u32;
+                for (i, k) in voicing.iter().enumerate() {
+                    match brass {
+                        1 => {
+                            // each note enters a little after the one below
+                            let delay = (i as u32 * beat / 2).min(len / 2);
+                            self.note(Inst::StringPad, start + delay, len - delay, *k, vel - 3.0 * i as f64);
+                        }
+                        2 if !last => {
+                            // struck again each bar, softer the second time
+                            let bars = span / self.bar;
+                            for j in 0..bars {
+                                let on = start + j * self.bar;
+                                let l = if j + 1 == bars { len - j * self.bar } else { self.bar - s16 };
+                                self.note(Inst::StringPad, on, l, *k, vel - 8.0 * j as f64);
+                            }
+                            if i as u32 + 1 == n && it > 0.6 {
+                                self.note(Inst::StringPad, start, len, k + 12, vel - 10.0);
+                            }
+                        }
+                        _ => self.note(Inst::StringPad, start, len, *k, vel),
+                    }
+                }
+                let to = if breath || last { 35.0 } else { 60.0 + 20.0 * it };
+                self.swell(Inst::StringPad, start, span, 35.0 + 15.0 * it, 85.0 + 40.0 * it, to);
+            } else {
+                self.pad(start, len, &voicing, vel * 0.8);
+            }
+
+            // The drone, low and long: one note for each phrase on the tonic,
+            // or the chord's root.
+            if follow {
+                let k = self.bass_key(&chord, 31);
+                self.note(bass_inst, start, len.max(span), k, 40.0 + 24.0 * it);
+            } else if (b / hr) % 4 == 0 {
+                let k = self.bass_key(&Chord::new(0, Ext::Triad), 31);
+                let phrase = (4 * hr * self.bar).min(end - start);
+                self.note(bass_inst, start, phrase + beat, k, 40.0 + 24.0 * it);
+            }
+
+            // The pulse, plucked low, once the piece has opened up.
+            for bar in b..(b + hr).min(self.bars) {
+                let bs = bar * self.bar;
+                let it = self.it(bar);
+                if self.full(bar) < 0.45 || bar + 1 == self.bars {
+                    continue;
+                }
+                let root = self.bass_key(&chord, 43);
+                match pulse {
+                    0 => {
+                        // a slow heartbeat on beats one and three
+                        for at in [0, 2 * beat] {
+                            self.note(Inst::Pizzicato, bs + at, beat / 2, root, 34.0 + 22.0 * it);
+                            self.note(Inst::Pizzicato, bs + at + beat / 3, beat / 2, root, 24.0 + 18.0 * it);
+                        }
+                    }
+                    1 => {
+                        // a ticking figure in quavers: root, octave, fifth, octave
+                        let fifth = self.scale.midi(self.scale.degree_near(root) + 4);
+                        for (i, k) in [root, root + 12, fifth, root + 12].iter().cycle().take(8).enumerate() {
+                            let accent = if i % 4 == 0 { 8.0 } else { 0.0 };
+                            self.note(Inst::Pizzicato, bs + i as u32 * beat / 2, beat / 2, *k, 26.0 + 20.0 * it + accent);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Rain: bells high above, a drop at a time, or in little falling runs.
+        let bell = if self.piano { Inst::Piano } else { Inst::Pizzicato };
+        for b in 0..self.bars {
+            let it = self.it(b);
+            let chord = self.harmony[b as usize].clone();
+            let start = b * self.bar;
+            let scale = self.scale;
+            let tone = |deg: i32| {
+                let mut deg = deg;
+                while !chord.contains(deg) && !scale.is_pentatonic(deg) {
+                    deg += 1;
+                }
+                deg
+            };
+            if rain == 1 {
+                if b % 2 == 0 && rng.chance(0.25 + 0.6 * d * it) {
+                    let at = start + rng.range(0, 5) as u32 * beat / 2;
+                    let mut deg = tone(rng.range(16, 20));
+                    let n = rng.range(3, 5);
+                    for i in 0..n {
+                        let t = at + i as u32 * beat / 3;
+                        self.note(bell, t, 3 * beat, self.scale.midi(deg), 30.0 + 22.0 * it - 3.0 * i as f64);
+                        deg = tone(deg - 2);
+                    }
+                }
+            } else {
+                for _ in 0..rng.poisson(0.2 + 1.0 * d * it) {
+                    let at = start + rng.range(0, 7) as u32 * beat / 2;
+                    let deg = tone(rng.range(14, 20));
+                    let dur = rng.range(2, 5) as u32 * beat;
+                    self.note(bell, at, dur, self.scale.midi(deg), 24.0 + 24.0 * it + rng.gauss() * 3.0);
+                }
+            }
+        }
+
+        // The smoky lead.
+        if self.strings {
+            let phrase = 4 * hr;
+            let insts: Vec<Option<Inst>> = (0..self.bars)
+                .map(|b| {
+                    let on = match lead {
+                        1 => (b / phrase) % 2 == 1 && self.full(b) > 0.3,
+                        2 => self.full(b) > 0.35,
+                        _ => self.full(b) > 0.5,
+                    };
+                    on.then_some(Inst::Violin)
+                })
+                .collect();
+            const PAT_LONG: &[Pattern] = &[&[(0, 8)], &[(2, 6)], &[(0, 6)], &[(4, 4)]];
+            let mut cfg = MelodyCfg {
+                lo: 4,
+                hi: 12,
+                patterns: if lead == 2 { PAT_LONG } else { PAT_SLOW_44 },
+                phrase_bars: 4,
+                vel: 52.0,
+                rest_bar_prob: if lead == 2 { 0.4 } else { 0.25 },
+                ornaments: false,
+            };
+            self.vary_melody(&mut cfg);
+            let mut rng = self.rng("melody");
+            let m = self.melody(&mut rng, &cfg, &insts);
+            self.notes.extend(m);
+        }
+    }
+
     fn arrange(&mut self, secs_per_bar: f64) {
         if self.p.version < 2 {
             return;
@@ -2484,6 +3094,9 @@ impl<'a> Ctx<'a> {
             bars: self.bars,
             notes: self.notes,
             ctrls: init,
+            bends: Vec::new(),
+            exprs: Vec::new(),
+            off: Vec::new(),
             chords,
             parts,
             total_ticks,

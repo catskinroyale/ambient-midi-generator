@@ -352,6 +352,40 @@ fn choir(root: u8) -> Sample {
     looped("Choir", root, cents, &[], &cycle)
 }
 
+/// A reed's resonances ("oo" towards "ah"), on a falling slope: the body of a
+/// saxophone-like lead.
+fn reed(hz: f64) -> f64 {
+    let peaks = [(520.0, 1.0, 140.0), (1450.0, 0.55, 260.0), (2700.0, 0.22, 400.0)];
+    let mut g = 0.12 / (1.0 + (hz / 1800.0).powi(2));
+    for (fc, a, bw) in peaks {
+        g += a / (1.0 + ((hz - fc) / bw).powi(2));
+    }
+    g
+}
+
+/// Two saws a few cents apart through reed resonances, with a breath of noise,
+/// both looping cleanly like the choir.
+fn smoky_lead(root: u8) -> Sample {
+    let (k, cents) = fit(root, PAD_LOOP);
+    let mut rng = Rng(0x5A0C_0066 ^ root as u64);
+    let f0 = midi_hz(root as f64);
+    // the odd harmonics a little stronger, for a hollow, reedy edge
+    let shape = move |n: usize, hz: f64| {
+        let odd = if n % 2 == 1 { 1.0 } else { 0.7 };
+        odd * (0.35 + reed(hz)) * lowpass(hz, 5000f64.max(6.0 * f0), 2) / n as f64
+    };
+    let voice = periodic(PAD_LOOP, &stack(k, PAD_LOOP, &[(-3.0, 1.0), (3.0, 0.8)], &shape, &mut rng));
+    let lo = (900.0 * PAD_LOOP as f64 / SR) as usize;
+    let hi = (6000.0 * PAD_LOOP as f64 / SR) as usize;
+    let breath: Vec<Partial> = (lo..hi)
+        .map(|bin| Partial { bin, amp: reed(bin as f64 * SR / PAD_LOOP as f64) + 0.1, phase: rng.next() })
+        .collect();
+    let breath = periodic(PAD_LOOP, &breath);
+    let mix = 0.05 * rms(&voice) / rms(&breath);
+    let cycle: Vec<f64> = voice.iter().zip(&breath).map(|(v, b)| v + mix * b).collect();
+    looped("SmokyLead", root, cents, &[], &cycle)
+}
+
 // ---- Bank layout -----------------------------------------------------------------------
 
 struct Zone {
@@ -508,6 +542,44 @@ fn design() -> Bank {
     bank.add("Sweep Pad", 95, sweep_gens, &roots(24, 84), |r| {
         single(pad("SweepPad", r, &[(&[(-16.0, 1.0), (-6.0, 1.0), (6.0, 1.0), (16.0, 1.0)], &bright)]))
     });
+
+    // The CS-80's brass: bright, slightly detuned saws (and one an octave down)
+    // behind a resonant filter that swells open as the note starts and then
+    // settles, with vibrato creeping in on held chords.
+    let mut brass_gens = env(0.12, 1.2);
+    brass_gens.extend([
+        (INITIAL_FC, abs_cents(480.0)),
+        (FILTER_Q, 40),
+        (ATTACK_MOD_ENV, tc(0.45)),
+        (DECAY_MOD_ENV, tc(2.5)),
+        (SUSTAIN_MOD_ENV, 450),
+        (RELEASE_MOD_ENV, tc(1.2)),
+        (MOD_ENV_TO_FC, 3900),
+        (DELAY_VIB_LFO, tc(1.2)),
+        (FREQ_VIB_LFO, abs_cents(5.5)),
+        (VIB_LFO_TO_PITCH, 6),
+        atten(40),
+    ]);
+    bank.add("CS Brass", 62, brass_gens, &roots(36, 84), |r| {
+        let full = |n: usize, hz: f64| lowpass(hz, 9000.0, 2) / n as f64;
+        single(pad("CSBrass", r, &[(&[(-7.0, 1.0), (6.0, 1.0), (-1197.0, 0.35)], &full)]))
+    });
+
+    // A lead for slow, smoky tunes: it breathes in, brightens a little as it's
+    // blown, and its vibrato arrives late.
+    let mut smoky_gens = env(0.07, 0.6);
+    smoky_gens.extend([
+        (INITIAL_FC, abs_cents(1800.0)),
+        (ATTACK_MOD_ENV, tc(0.2)),
+        (DECAY_MOD_ENV, tc(1.2)),
+        (SUSTAIN_MOD_ENV, 350),
+        (MOD_ENV_TO_FC, 2400),
+        (DELAY_VIB_LFO, tc(0.4)),
+        (FREQ_VIB_LFO, abs_cents(5.2)),
+        (VIB_LFO_TO_PITCH, 12),
+        atten(60),
+    ]);
+    bank.add("Smoky Lead", 66, smoky_gens, &roots(36, 84), |r| single(smoky_lead(r)));
 
     bank.add("Crystal Bells", 98, [env(0.001, 1.5), vec![atten(0)]].concat(), &roots(36, 96), |r| {
         single(bells(r))
@@ -681,12 +753,14 @@ mod tests {
     use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
     use std::sync::Arc;
 
-    const EXPECTED: [(i32, &str); 12] = [
+    const EXPECTED: [(i32, &str); 14] = [
         (0, "Sine Keys"),
         (4, "FM Electric Piano"),
         (38, "Analog Sub Bass"),
         (45, "Analog Pluck"),
         (50, "Supersaw Strings"),
+        (62, "CS Brass"),
+        (66, "Smoky Lead"),
         (81, "Soft Saw Lead"),
         (88, "Warm Analog Pad"),
         (89, "Glass Pad"),

@@ -30,13 +30,16 @@ cargo run --release
 | Koto Garden | koto in a five-note scale (hirajoshi in minor) with pulls, falling runs and tremolo, a breathy shakuhachi and an open-fifth drone |
 | Gamelan Shimmer | interlocking metallophone figures around a slow core melody in a five-note scale, a gong closing each cycle |
 | Fingerstyle Guitar | Travis-picked nylon guitar: alternating bass under syncopated treble, soft strings and a simple tune |
+| Neon Noir | electronic, in the spirit of Vangelis's *Blade Runner*: CS-80-style brass swells that sag in pitch at the end of each phrase, a smoky lead with deep vibrato over a low drone, bells falling like rain, and sometimes a slow heartbeat or a ticking pulse |
 
-Every style has a palette of sounds that suit it. With **Sounds follow the seed** on (in Parts), each new seed or style picks its sounds from the palette, so pieces don't all use the same instruments. The electronic styles keep to the bundled Ambient Electronic SoundFont. **Style's sounds** puts back the sounds a style is written for, and **Shuffle** picks others. Turn the option off to keep the sounds you chose; then only the electronic styles and those with their own instruments change the sounds when you choose them.
+Every style has a palette of sounds that suit it. With **Sounds follow the seed** on (in Parts), each new seed or style picks its sounds from the palette, so pieces don't all use the same instruments. The electronic styles keep to the bundled Ambient Electronic SoundFont. **Style's sounds** puts back the sounds a style is written for, and **Shuffle** picks others. Turn the option off to keep the sounds you chose; then only the electronic styles and those with their own instruments change the sounds when you choose them. Neon Noir also brings its own effects: the Noir hall, the ensemble chorus and an echo on the lead and bells. Choosing another style puts them back, unless you've changed them.
 
 Pieces develop as they go. Each seed picks a song form, such as A A B A, A B A C or A B C A, from a larger set of chord progressions, and sections come back a little changed. The arrangement also changes from section to section:
 - **Breakdown:** somewhere past the middle, the bass, pulse and the keys' left hand drop away, and the tune often returns an octave higher afterwards.
 - **Rests and thinning:** elsewhere the tune may rest, the accompaniment thin out, or the pad drop out.
 - **Opening and ending:** the first and last sections play as the style wrote them.
+
+Each style also comes in variants, which the seed chooses separately for each part of the texture. Depending on the style, these include the accompaniment figure, the bass line, the voicing, the rhythm of the pulse or comping, the drone and the phrasing of the tune. For example, Gymnopédie Waltz may roll its chords or alternate root and fifth in the bass, Berlin School may loop its sequence every 12 steps against the bar, and Dub Chords may echo in quavers, dotted quavers or crotchets. Two seeds of the same style can sound like different pieces.
 
 Recipes saved by earlier versions keep their `"version"` and play exactly as before.
 
@@ -48,20 +51,27 @@ Recipes saved by earlier versions keep their `"version"` and play exactly as bef
 - **Density, Variation, Dynamics, Humanize**: shape the result. Density thins or fills every part: melody, accompaniment rhythm, bass movement and how soon strings and pads join in. Each slider is labelled at both ends with which way is less and which is more, such as sparse ◀ ▶ busy.
 - **Parts**: each piece is arranged into up to five parts: Keys, Pad, Lead, Bass and Pluck. For each part you can:
   - switch it on or off. Switching a part off leaves the others note-for-note identical, and the piece keeps the same length.
-  - choose its sound from about 40 General MIDI sounds: pianos, electric piano, celesta, glockenspiel, music box, vibraphone, marimba, kalimba, tubular bells, harp, guitars, koto, strings, choirs, pads, flute, pan flute, shakuhachi, clarinet, oboe, bassoon and French horn.
+  - choose its sound from about 40 General MIDI sounds: pianos, electric piano, celesta, glockenspiel, music box, vibraphone, marimba, kalimba, tubular bells, harp, guitars, koto, strings, choirs, pads, flute, pan flute, shakuhachi, clarinet, oboe, bassoon, French horn, tenor sax and synth brass.
   Both choices are saved in the recipe and in the MIDI file. Parts the current style doesn't use are greyed out.
-- **Reverb & tuning**: these change the sound but not the notes, and apply straight away while the piece plays:
-  - **Space**: Room, Hall, Cathedral, Shimmer (the tail rises an octave) or Black Hole (enormous, slowly swirling and almost endless).
-  - **Amount** (dry ◀ ▶ wet, also written to the MIDI file as CC91), **Size** (short ◀ ▶ long), **Tone** (dark ◀ ▶ bright) and **Motion** (still ◀ ▶ swirling).
-  - With **Shimmer**, two more controls appear. **Feedback** (subtle ◀ ▶ intense) sets how much of the octave-up tail is fed back in; more climbs higher and leaves more shimmer artefacts. **Fb. detune** (pure ◀ ▶ wide) splits that feedback into a sharp and a flat copy, up to 35 cents either side of the octave, so they beat against each other and spread across the stereo field.
-  - **Detune** pulls each part and note slightly off pitch and widens ensemble sounds. **Drift** adds a slow, tape-like pitch wander. **Tuning** sets A to 440, 432 or 415 Hz.
-  They work with both the built-in synth and SoundFonts, and are saved in the recipe. Tuning, detune and drift aren't written to the MIDI file.
+- **Effects & tuning**: these change the sound but not the notes, and apply straight away while the piece plays:
+  - **Space**: Room, Plate (bright and dense, blooming at once), Hall, Cathedral, Noir (a vast, dark 1980s digital hall: a long pause before it blooms, then a slow, chorused tail), Shimmer (the tail rises an octave), Cloud (granular: the reverb is fed scattered, slightly detuned fragments of what was just played) or Black Hole (enormous, slowly swirling and almost endless).
+  - **Amount** (dry ◀ ▶ wet, also written to the MIDI file as CC91), **Size** (short ◀ ▶ long), **Tone** (dark ◀ ▶ bright) and **Motion** (still ◀ ▶ swirling; in Cloud, how far the grains wander).
+  - With **Shimmer**, three more controls appear. **Feedback** (subtle ◀ ▶ intense) sets how much of the pitched tail is fed back in; more climbs higher and leaves more shimmer artefacts. **Feedback detune** (pure ◀ ▶ wide) splits that feedback into a sharp and a flat copy, up to 35 cents either side, so they beat against each other and spread across the stereo field. **Interval** pitches the tail an octave up, a fifth up, two octaves up or an octave down.
+  - **Pre-delay** adds up to a quarter second before the reverb starts, so each note is heard clearly first. **Low cut** keeps low notes out of the reverb (40 to 640 Hz). **Width** spreads the reverb from mono to extra wide. **Ducking** dips the reverb while the music plays, so it blooms in the gaps.
+  - **Freeze the tail** holds the reverb as it is, ringing on forever, while new notes play dry over it.
+  - **Echo**: a tempo-synced echo (1/8 to 1/2, dotted values included) with **Repeats**, **Tone** (each repeat darker, like tape), **Wow**, **Into reverb** and **Ping-pong**. How much of each part goes into it is set on the mixer.
+  - **Detune** pulls each part and note slightly off pitch and widens ensemble sounds. **Drift** adds a slow, tape-like pitch wander. **Tuning** sets A to 440, 432 or 415 Hz. **Ensemble** (off ◀ ▶ lush) is a string-machine chorus over every part but the bass, turning each sound into a slightly out-of-tune ensemble, like a 1970s polysynth.
+  They work with both the built-in synth and SoundFonts, and are saved in the recipe. Tuning, detune, drift and the ensemble aren't written to the MIDI file.
+- **Mixer** (the **Mixer** button below the piano roll): a stereo mixer with a channel for each part. Each channel has a fader, a level meter, **Pan**, stereo **Width**, **Reverb** and **Echo** sends, and **M**ute and **S**olo; the **Master** has a fader and a stereo meter. Parts can share a channel: **+ Channel** adds one (up to eight), and its **⋯** menu names it and chooses which parts play through it, so one fader moves them together. Double-click a fader or slider to reset it. The mixer is saved in the recipe and the project. Exported WAV files are mixed as you hear them. Saved MIDI files carry each part's fader, pan and reverb send as volume (CC7), pan (CC10) and reverb (CC91); mutes and solos are left out of the MIDI file, since they are for listening.
+- **Note expression**: long notes of the tune and bass get vibrato that grows after the note starts, the longest notes of the tune swell, and now and then the tune slides up into a note after a leap. This is written to the MIDI file as modulation (CC1, for vibrato), expression (CC11) and pitch bend. Only sustaining sounds (strings, winds, pads) get it, and only pieces made by version 3 of the generator. Neon Noir plays its own way, like a CS-80: its brass chords sag in pitch as they die away in the breath at the end of a phrase, and its lead has a deeper vibrato and slides up into notes more often.
+- **Editing notes**: turn on **Edit notes** above the piano roll, then click a note to switch it off (it stays as an outline, and clicking it again switches it back on). Drag across notes to switch several. Right-click any note, in or out of edit mode, to set its velocity and shape it: **Swell** (below 0 it fades away, above 0 it swells up and back), **Vibrato** and **Bend** (above 0 it slides up into the note, below 0 it falls away at the end). The shapes act on the part's channel, so on parts that play chords they shape the other notes sounding at the time too. Edits belong to the piece they were made on: a new seed or setting that changes the notes leaves them aside, and they come back if you return to it. **Undo edits** removes them all. They are saved in the recipe, the project and the MIDI file. While the piece plays, editing a note doesn't interrupt it.
+- **Zoom**: pinch, or scroll with ⌘ (Ctrl on Windows), on the piano roll to zoom in around the pointer; scroll to move along. **Fit** shows the whole piece again.
 - **Seed**: the same settings and seed always give exactly the same piece. Each musical layer (harmony, melody, texture…) has its own random stream, so changing one setting doesn't reshuffle everything else. Use 🎲 for a new seed, ◀ ▶ to step through seeds, or ✨ to randomise every setting.
 - **Recipe**: a JSON copy of all the settings. Copy it, paste it back with Apply, or use **From .mid…** to recreate a piece from any MIDI file this app saved. The recipe is stored inside the file.
 
 ## Sound
 
-The built-in synth (piano, electric piano, mallets and bells, plucked strings, bowed strings, choirs and pads, winds, and a hall reverb) works without any other files. The reverb is a modulated feedback-delay-network design with early reflections and five spaces, and SoundFonts are played through it too. For more realistic instruments, load SoundFonts (.sf2):
+The built-in synth (piano, electric piano, mallets and bells, plucked strings, bowed strings, choirs and pads, winds, and a hall reverb) works without any other files. Every part plays through its own engine into the mixer, which feeds one shared reverb and echo. The reverb is a modulated feedback-delay-network design with early reflections and eight spaces, and SoundFonts are played through it too. For more realistic instruments, load SoundFonts (.sf2):
 
 - **Main sound**: the built-in synth or a General MIDI SoundFont, such as GeneralUser GS or FluidR3_GM. It plays every part that doesn't have its own preset.
 - **Per part**: each part can instead play a preset from any loaded SoundFont, such as a felt piano font for Keys and a choir font for Pad. In **Parts**, choose the font in the middle drop-down and the preset in the right one.
@@ -72,7 +82,7 @@ You can load several SoundFonts at once. They are used for both playback and WAV
 This repo includes two SoundFonts in `soundfonts/`, and the app loads both at startup:
 
 - [GeneralUser GS](https://schristiancollins.com/generaluser.php) by S. Christian Collins, a General MIDI font and the main sound. Its licence is in `soundfonts/GeneralUser-GS-LICENSE.txt`.
-- **Ambient Electronic**, 12 synthesiser presets made for this app: Sine Keys, FM Electric Piano, Analog Sub Bass, Analog Pluck, Supersaw Strings, Soft Saw Lead, Warm Analog Pad, Glass Pad, Airy Choir, Halo Pad, Sweep Pad and Crystal Bells. They sit at their General MIDI program numbers. It contains no recorded samples: `examples/make_soundfont.rs` synthesises every sound, and `cargo run --release --example make_soundfont` rebuilds the file exactly. It is under the MIT License, like the code.
+- **Ambient Electronic**, 14 synthesiser presets made for this app: Sine Keys, FM Electric Piano, Analog Sub Bass, Analog Pluck, Supersaw Strings, CS Brass (detuned saws behind a filter that swells open, CS-80 style), Smoky Lead (a breathy, reedy lead), Soft Saw Lead, Warm Analog Pad, Glass Pad, Airy Choir, Halo Pad, Sweep Pad and Crystal Bells. They sit at their General MIDI program numbers. It contains no recorded samples: `examples/make_soundfont.rs` synthesises every sound, and `cargo run --release --example make_soundfont` rebuilds the file exactly. It is under the MIT License, like the code.
 
 To build a macOS app bundle with the icon and SoundFont, run `./scripts/bundle_macos.sh`. The bundle is written to `dist/`.
 
@@ -94,7 +104,7 @@ Many editors (iMovie, Clipchamp, CapCut, Photos) overlap neighbouring clips to c
 ## Projects
 
 **💾 Save project** (⌘S / Ctrl+S) saves everything in one `.ambient` file:
-- every setting, including parts, sounds, reverb and tuning, and the seed
+- every setting, including parts, sounds, effects and tuning, the mixer, note edits, and the seed
 - volume, loop and "Regenerate on change"
 - the slideshow settings
 - the loaded SoundFonts, which one is the main sound and which parts use which font

@@ -3,11 +3,14 @@
 
 mod about;
 mod app;
+mod expression;
 mod fonts;
 mod generator;
 #[cfg(target_os = "macos")]
 mod menu;
 mod midi_export;
+mod mixer;
+mod mixer_ui;
 mod player;
 mod project;
 mod reverb;

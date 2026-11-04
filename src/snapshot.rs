@@ -2,8 +2,10 @@
 //! of its window once the first frames have settled, then quits, without saving
 //! any settings. `MIDIGEN_SCREENSHOT_SHOW` can name things to show first,
 //! comma-separated: `sections` (open every section), `sound` (open only the
-//! sound sections), `electronic` (start on an electronic style), `about`, and `libraries`
-//! (About, scrolled to the library list with one selected).
+//! sound sections), `electronic` (start on an electronic style), `noir` (start on Neon Noir), `effects` (only the
+//! effects section, on the shimmer space), `mixer` (show the mixer), `edit` (note
+//! editing on), `zoom` (the piano roll zoomed in), `about`, and `libraries` (About,
+//! scrolled to the library list with one selected).
 
 use std::path::PathBuf;
 use std::sync::Arc;

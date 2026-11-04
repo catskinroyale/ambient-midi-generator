@@ -1,12 +1,17 @@
 //! A stereo algorithmic reverb: pre-delay, early reflections, input diffusion
 //! and an eight-line feedback delay network with slowly modulated delays (which
 //! keeps the tail smooth rather than metallic) and high frequencies that die
-//! away faster than lows. Five spaces share the design, from a small room to a
-//! huge, swirling "black hole"; the shimmer space pitches its tail up an octave.
+//! away faster than lows. Seven spaces share the design, from a small room to a
+//! huge, swirling "black hole"; the shimmer space pitches its tail up (or down),
+//! and the cloud feeds it scattered grains of what was just played. The tail
+//! can be widened, kept clear of low notes, delayed, and frozen.
 
 use std::f32::consts::{PI, TAU};
 
 use crate::song::{Fx, Space};
+
+/// The most pre-delay the Pre-delay control adds, in milliseconds.
+const MAX_EXTRA_PRE_MS: f32 = 250.0;
 /// Delay line lengths in milliseconds, chosen to avoid common factors.
 const LINES_MS: [f32; 8] = [37.1, 41.9, 47.3, 53.9, 61.7, 67.1, 73.9, 83.3];
 /// Early reflections: (milliseconds, gain, side).
@@ -154,6 +159,47 @@ fn preset(space: Space) -> Preset {
             shimmer: 0.3,
             wet: 0.8,
         },
+        Space::Plate => Preset {
+            scale: 0.75,
+            decay: 2.6,
+            pre_ms: 0.0,
+            early: 0.0,
+            depth_ms: 0.3,
+            rate: 1.3,
+            damp: 0.14,
+            diffuse_scale: 0.8,
+            diffuse_g: 0.78,
+            shimmer: 0.0,
+            wet: 0.9,
+        },
+        Space::Cloud => Preset {
+            scale: 1.8,
+            decay: 9.0,
+            pre_ms: 10.0,
+            early: 0.0,
+            depth_ms: 1.4,
+            rate: 0.6,
+            damp: 0.3,
+            diffuse_scale: 1.8,
+            diffuse_g: 0.76,
+            shimmer: 0.0,
+            wet: 2.4,
+        },
+        // a big 80s digital hall: a long pre-delay, few early reflections,
+        // a dark tail that swims in pitch
+        Space::Noir => Preset {
+            scale: 2.3,
+            decay: 9.5,
+            pre_ms: 70.0,
+            early: 0.08,
+            depth_ms: 1.8,
+            rate: 0.5,
+            damp: 0.5,
+            diffuse_scale: 2.0,
+            diffuse_g: 0.76,
+            shimmer: 0.0,
+            wet: 1.0,
+        },
         Space::BlackHole => Preset {
             scale: 3.2,
             decay: 24.0,
@@ -209,10 +255,7 @@ impl Shifter {
         self.hp = self.hp_coef * self.hp + (1.0 - self.hp_coef) * x;
         self.delay.push(x - self.hp);
         // the read point gains (ratio - 1) samples per sample on the write: at 2, twice the pitch
-        self.phase += (self.ratio - 1.0) / self.win;
-        if self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
+        self.phase = (self.phase + (self.ratio - 1.0) / self.win).rem_euclid(1.0);
         let mut out = 0.0;
         for k in 0..2 {
             let ph = (self.phase + k as f32 * 0.5).fract();
@@ -220,6 +263,87 @@ impl Shifter {
             out += self.delay.read(1.0 + (1.0 - ph) * self.win) * w * w;
         }
         out
+    }
+}
+
+/// A granular smear for the cloud: short windowed grains read from the last
+/// second or so of input, at scattered times, slightly off pitch and panned
+/// about, then fed into the reverb.
+struct Grains {
+    buf: Delay,
+    grains: [Grain; 8],
+    sr: f32,
+    seed: u32,
+    /// How far grains wander in pitch and time (from Motion).
+    scatter: f32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Grain {
+    /// Delay of the read point behind the write point, in samples.
+    pos: f32,
+    /// Read speed: 1 is the original pitch.
+    ratio: f32,
+    len: f32,
+    age: f32,
+    pan_l: f32,
+    pan_r: f32,
+}
+
+impl Grains {
+    fn new(sr: f32) -> Self {
+        let mut g = Grains { buf: Delay::new((sr * 1.6) as usize), grains: [Grain::default(); 8], sr, seed: 0x2545_f491, scatter: 0.5 };
+        // stagger the grains so they don't all start together
+        for i in 0..g.grains.len() {
+            g.grains[i] = g.spawn();
+            g.grains[i].age = g.grains[i].len * i as f32 / 8.0;
+        }
+        g
+    }
+
+    fn rand(&mut self) -> f32 {
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 17;
+        self.seed ^= self.seed << 5;
+        self.seed as f32 / u32::MAX as f32
+    }
+
+    fn spawn(&mut self) -> Grain {
+        let sr = self.sr;
+        let len = sr * (0.06 + 0.2 * self.rand());
+        let cents = (self.rand() - 0.5) * 2.0 * 14.0 * self.scatter;
+        let octave = self.rand() < 0.08 * self.scatter;
+        let ratio = 2f32.powf(cents / 1200.0) * if octave { 2.0 } else { 1.0 };
+        // start far enough back that the read point, moving at `ratio`, stays behind the write point
+        let min = len * (ratio - 1.0).max(0.0) + 2.0;
+        let pos = (sr * (0.03 + 0.9 * self.rand() * (0.4 + self.scatter))).max(min).min(self.buf.buf.len() as f32 - len * 2.0 - 4.0);
+        let angle = (0.5 + (self.rand() - 0.5) * 0.9) * PI / 2.0;
+        Grain { pos, ratio, len, age: 0.0, pan_l: angle.cos(), pan_r: angle.sin() }
+    }
+
+    fn clear(&mut self) {
+        self.buf.buf.fill(0.0);
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32) -> (f32, f32) {
+        self.buf.push(x);
+        let (mut l, mut r) = (0.0, 0.0);
+        for i in 0..self.grains.len() {
+            let mut g = self.grains[i];
+            if g.age >= g.len {
+                g = self.spawn();
+            }
+            let w = (PI * g.age / g.len).sin();
+            let v = self.buf.read(g.pos.max(1.0)) * w * w;
+            l += v * g.pan_l;
+            r += v * g.pan_r;
+            g.age += 1.0;
+            // the read point falls behind by one sample per sample written, less its own speed
+            g.pos += 1.0 - g.ratio;
+            self.grains[i] = g;
+        }
+        (l * 0.45, r * 0.45)
     }
 }
 
@@ -245,6 +369,14 @@ pub struct Reverb {
     /// How much of the shimmer goes through the second (flat) shifter.
     shimmer_mix: f32,
     wet: f32,
+    grains: Option<Grains>,
+    /// Stereo width of the output: 1 is natural.
+    width: f32,
+    /// How much new sound gets in: 0 while frozen. It glides to `input_target`.
+    input: f32,
+    input_target: f32,
+    /// The space's own pre-delay, before the extra from the control.
+    base_pre: usize,
 }
 
 impl Reverb {
@@ -252,6 +384,7 @@ impl Reverb {
         let p = preset(fx.space);
         let ms = |m: f32| m * 0.001 * sr;
         let pre_len = ms(p.pre_ms) as usize;
+        let max_pre = ms(p.pre_ms + MAX_EXTRA_PRE_MS) as usize;
         let tap_scale = p.scale / 1.25;
         let longest_tap = ms(TAPS[TAPS.len() - 1].0 * tap_scale) as usize;
         // room for the deepest modulation the Motion control allows
@@ -280,7 +413,7 @@ impl Reverb {
         let mut r = Reverb {
             sr,
             space: fx.space,
-            pre: [Delay::new(pre_len + longest_tap + 2), Delay::new(pre_len + longest_tap + 2)],
+            pre: [Delay::new(max_pre + longest_tap + 2), Delay::new(max_pre + longest_tap + 2)],
             pre_len,
             hp: [0.0; 2],
             hp_coef: (-TAU * 160.0 / sr).exp(),
@@ -296,6 +429,11 @@ impl Reverb {
             shimmer_gain: p.shimmer,
             shimmer_mix: 0.0,
             wet: p.wet,
+            grains: (fx.space == Space::Cloud).then(|| Grains::new(sr)),
+            width: 1.0,
+            input: if fx.freeze { 0.0 } else { 1.0 },
+            input_target: 1.0,
+            base_pre: pre_len,
         };
         r.set(fx);
         r
@@ -322,15 +460,30 @@ impl Reverb {
         self.tone_coef = (-TAU * 3000.0 * 2f32.powf(fx.tone * 2.6) / sr).exp();
         // Longer tails build up more; keep the overall level about the same.
         self.wet = p.wet * (p.decay / decay).powf(0.35);
+        self.pre_len = self.base_pre + (fx.predelay.clamp(0.0, 1.0) * MAX_EXTRA_PRE_MS * 0.001 * sr) as usize;
+        self.hp_coef = (-TAU * 160.0 * 4f32.powf(fx.low_cut.clamp(0.0, 1.0) * 2.0 - 1.0) / sr).exp();
+        self.width = fx.width.clamp(0.0, 1.0) * 2.0;
+        if let Some(g) = &mut self.grains {
+            g.scatter = fx.motion;
+        }
+        // Frozen: the tail neither decays nor darkens, and nothing new gets in.
+        self.input_target = if fx.freeze { 0.0 } else { 1.0 };
+        if fx.freeze {
+            for line in self.lines.iter_mut() {
+                line.gain = 1.0;
+            }
+            self.damp = 0.0;
+        }
         // Shimmer: the feedback level, and the two shifters pulled apart by up
         // to 35 cents either side of the octave.
         // the default (0.5) is the space's natural level; the top end is about three times it
-        self.shimmer_gain = p.shimmer * (2.0 * fx.shimmer).powf(1.6);
+        self.shimmer_gain = if fx.freeze { 0.0 } else { p.shimmer * (2.0 * fx.shimmer).powf(1.6) };
         let cents = 35.0 * fx.shimmer_detune;
         self.shimmer_mix = (fx.shimmer_detune * 4.0).min(1.0) * 0.5;
+        let interval = fx.shimmer_interval.ratio();
         if let Some([a, b]) = &mut self.shimmer {
-            a.ratio = 2.0 * 2f32.powf(cents / 1200.0);
-            b.ratio = 2.0 * 2f32.powf(-cents / 1200.0);
+            a.ratio = interval * 2f32.powf(cents / 1200.0);
+            b.ratio = interval * 2f32.powf(-cents / 1200.0);
         }
     }
 
@@ -351,6 +504,9 @@ impl Reverb {
             s.delay.buf.fill(0.0);
             s.hp = 0.0;
         }
+        if let Some(g) = &mut self.grains {
+            g.clear();
+        }
         self.hp = [0.0; 2];
         self.tone = [0.0; 2];
     }
@@ -359,7 +515,8 @@ impl Reverb {
     #[inline]
     pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
         // High-pass the send so low notes don't muddy the tail.
-        let mut x = [l, r];
+        self.input += (self.input_target - self.input) * 0.0005;
+        let mut x = [l * self.input, r * self.input];
         for s in 0..2 {
             self.hp[s] = self.hp_coef * self.hp[s] + (1.0 - self.hp_coef) * x[s];
             x[s] -= self.hp[s];
@@ -372,6 +529,12 @@ impl Reverb {
             }
         }
         let mut input = [self.pre[0].tap(self.pre_len), self.pre[1].tap(self.pre_len)];
+        let mut cloud = [0.0f32; 2];
+        if let Some(g) = &mut self.grains {
+            let (gl, gr) = g.process((input[0] + input[1]) * 0.5);
+            cloud = [gl, gr];
+            input = [input[0] * 0.35 + gl, input[1] * 0.35 + gr];
+        }
         for s in 0..2 {
             for a in self.diffuse[s].iter_mut() {
                 input[s] = a.process(input[s]);
@@ -423,9 +586,14 @@ impl Reverb {
         }
 
         let mut wet = [
-            (out_l * 0.35 + early[0] * self.early) * self.wet,
-            (out_r * 0.35 + early[1] * self.early) * self.wet,
+            (out_l * 0.35 + early[0] * self.early + cloud[0] * 0.25) * self.wet,
+            (out_r * 0.35 + early[1] * self.early + cloud[1] * 0.25) * self.wet,
         ];
+        if self.width != 1.0 {
+            let mid = (wet[0] + wet[1]) * 0.5;
+            let side = (wet[0] - wet[1]) * 0.5 * self.width;
+            wet = [mid + side, mid - side];
+        }
         for s in 0..2 {
             self.tone[s] = self.tone_coef * self.tone[s] + (1.0 - self.tone_coef) * wet[s];
             wet[s] = self.tone[s];
@@ -508,6 +676,73 @@ mod tests {
             let (on, end) = (10.0 * (on / (sr as f64 * 3.0)).log10(), 10.0 * (end / sr as f64 + 1e-30).log10());
             println!("shimmer detune {detune}: on {on:.1} dB, last second {end:.1} dB, peak {peak:.2}");
             assert!(peak < 2.0 && end < on - 30.0, "detune {detune} runs away");
+        }
+    }
+
+    /// Frozen, the tail holds its level, takes nothing new in, and stays bounded.
+    #[test]
+    fn freeze_holds_the_tail() {
+        let sr = 44100.0;
+        for space in Space::ALL {
+            let mut fx = Fx { space, ..Fx::default() };
+            let mut r = Reverb::new(sr, &fx);
+            let mut seed = 3u32;
+            let mut noise = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as f32 / u32::MAX as f32 - 0.5
+            };
+            let rms = |r: &mut Reverb, secs: f32, input: &mut dyn FnMut() -> f32| {
+                let n = (sr * secs) as usize;
+                let mut acc = 0.0f64;
+                for _ in 0..n {
+                    let x = input();
+                    let (a, b) = r.process(x, -x);
+                    assert!(a.is_finite() && b.is_finite() && a.abs() < 4.0, "{space:?} frozen blew up");
+                    acc += (a as f64).powi(2);
+                }
+                10.0 * (acc / n as f64 + 1e-30).log10()
+            };
+            rms(&mut r, 1.5, &mut noise);
+            fx.freeze = true;
+            r.set(&fx);
+            let early = rms(&mut r, 1.0, &mut noise);
+            let late = rms(&mut r, 10.0, &mut noise);
+            println!("{space:?} frozen: {early:.1} dB, ten seconds on {late:.1} dB");
+            assert!(late > early - 12.0, "{space:?} frozen tail died away");
+            assert!(late < early + 3.0, "{space:?} frozen tail grew");
+        }
+    }
+
+    /// Every shimmer interval, at full feedback, stays bounded and dies away.
+    #[test]
+    fn shimmer_intervals_are_stable() {
+        use crate::song::Interval;
+        let sr = 44100.0;
+        for interval in Interval::ALL {
+            let fx = Fx { space: Space::Shimmer, shimmer: 1.0, size: 1.0, shimmer_interval: interval, ..Fx::default() };
+            let mut r = Reverb::new(sr, &fx);
+            let mut seed = 9u32;
+            let (mut on, mut end, mut peak) = (0.0f64, 0.0f64, 0.0f32);
+            let n = (sr * 40.0) as usize;
+            for i in 0..n {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let x = if i < sr as usize * 2 { seed as f32 / u32::MAX as f32 - 0.5 } else { 0.0 };
+                let (a, _) = r.process(x, x);
+                assert!(a.is_finite());
+                peak = peak.max(a.abs());
+                if i < sr as usize * 2 {
+                    on += (a as f64).powi(2);
+                } else if i > n - sr as usize {
+                    end += (a as f64).powi(2);
+                }
+            }
+            let (on, end) = (10.0 * (on / (sr as f64 * 2.0)).log10(), 10.0 * (end / sr as f64 + 1e-30).log10());
+            println!("{interval:?}: on {on:.1} dB, last second {end:.1} dB, peak {peak:.2}");
+            assert!(peak < 2.0 && end < on - 30.0, "{interval:?} runs away");
         }
     }
 

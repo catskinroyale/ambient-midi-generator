@@ -300,10 +300,11 @@ mod music {
 
     /// In the styles with a regular pulse, every image change lands on a note.
     /// (Generative Loops phases freely, Tidal Drone and Aurora hold chords for
-    /// four slow bars, and Koto Garden's phrases breathe across two.)
+    /// four slow bars, and Koto Garden's phrases and Neon Noir's brass chords
+    /// breathe across two.)
     #[test]
     fn image_changes_land_on_the_music() {
-        let free = [Style::GenerativeLoops, Style::TidalDrone, Style::Aurora, Style::KotoGarden];
+        let free = [Style::GenerativeLoops, Style::TidalDrone, Style::Aurora, Style::KotoGarden, Style::NeonNoir];
         for style in Style::ALL.into_iter().filter(|s| !free.contains(s)) {
             for seed in [1, 2] {
                 let p = Params { style, seed, tempo: style.default_tempo(), target_seconds: 120.0, ..Params::default() };

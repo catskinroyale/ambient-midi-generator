@@ -5,8 +5,9 @@
 use std::f32::consts::{PI, TAU};
 use std::sync::{Arc, OnceLock};
 
+use crate::expression::VIBRATO_CENTS;
 use crate::reverb::Reverb;
-use crate::song::Fx;
+use crate::song::{Fx, Mix};
 
 pub trait SynthEngine: Send {
     fn note_on(&mut self, ch: u8, key: u8, vel: u8);
@@ -18,6 +19,27 @@ pub trait SynthEngine: Send {
     fn render(&mut self, left: &mut [f32], right: &mut [f32]);
     /// Change the reverb and tuning while playing.
     fn set_fx(&mut self, _fx: &Fx) {}
+    /// Bend a channel's pitch by `cents`.
+    fn bend(&mut self, _ch: u8, _cents: f32) {}
+    /// Change the mixer while playing; `bpm` sets the echo's time.
+    fn set_mix(&mut self, _mix: &Mix, _bpm: f64) {}
+    /// For an engine rendering without its own reverb: how loud the reverb
+    /// fed from its output should be, to match it playing with its own.
+    fn wet_gain(&self) -> f32 {
+        1.0
+    }
+}
+
+/// Vibrato speed in Hz.
+const VIBRATO_HZ: f64 = 5.3;
+
+/// A channel's vibrato in cents at time `t`, for a modulation depth of 0..1.
+fn vibrato_cents(depth: f32, ch: u8, t: f64) -> f32 {
+    if depth <= 0.0 {
+        return 0.0;
+    }
+    let rate = VIBRATO_HZ * (1.0 + 0.04 * (ch as f64 - 2.0));
+    depth * VIBRATO_CENTS * (t * std::f64::consts::TAU * rate + ch as f64).sin() as f32
 }
 
 // ------------------------------------------------------------------ helpers
@@ -250,6 +272,8 @@ const CHOIR: BowCfg = BowCfg { detunes: &[-9.0, 0.0, 8.0], attack: 0.8, release:
 const PAD: BowCfg = BowCfg { detunes: &[-10.0, 0.0, 10.0], attack: 1.6, release: 2.8, vibrato: 0.0, bright: 0.6 };
 const SAW_LEAD: BowCfg = BowCfg { detunes: &[-5.0, 5.0], attack: 0.12, release: 0.5, vibrato: 8.0, bright: 1.1 };
 const HALO: BowCfg = BowCfg { detunes: &[-14.0, 0.0, 13.0], attack: 1.4, release: 3.0, vibrato: 3.0, bright: 0.8 };
+/// The CS-80's brass: bright, detuned saws that swell in.
+const SYNTH_BRASS: BowCfg = BowCfg { detunes: &[-7.0, 0.5, 6.5], attack: 0.3, release: 1.2, vibrato: 3.0, bright: 1.5 };
 
 struct Bowed {
     phases: [f32; 3],
@@ -384,6 +408,14 @@ const BASSOON: WindCfg = WindCfg {
     vibrato: 5.0,
     attack: 0.09,
     release: 0.25,
+};
+/// Reedy and breathy, with strong upper harmonics.
+const SAX: WindCfg = WindCfg {
+    harmonics: &[1.0, 0.75, 0.6, 0.45, 0.38, 0.3, 0.22, 0.16, 0.11, 0.07, 0.05],
+    noise: 0.03,
+    vibrato: 6.0,
+    attack: 0.07,
+    release: 0.3,
 };
 const HORN: WindCfg = WindCfg { harmonics: &[1.0, 0.55, 0.3, 0.16, 0.08, 0.04], noise: 0.004, vibrato: 4.0, attack: 0.15, release: 0.35 };
 
@@ -523,11 +555,25 @@ struct Channel {
     expr: f32,
     expr_target: f32,
     send: f32,
+    /// Pitch bend in cents, and the value it glides to.
+    bend: f32,
+    bend_target: f32,
+    /// Vibrato depth from the modulation wheel, 0..1.
+    vibrato: f32,
 }
 
 impl Default for Channel {
     fn default() -> Self {
-        Channel { program: 0, volume: 100.0 / 127.0, expr: 1.0, expr_target: 1.0, send: 0.4 }
+        Channel {
+            program: 0,
+            volume: 100.0 / 127.0,
+            expr: 1.0,
+            expr_target: 1.0,
+            send: 0.4,
+            bend: 0.0,
+            bend_target: 0.0,
+            vibrato: 0.0,
+        }
     }
 }
 
@@ -537,7 +583,8 @@ pub struct BuiltinSynth {
     sr: f32,
     voices: Vec<Voice>,
     channels: [Channel; 16],
-    reverb: Reverb,
+    /// None when the mixer adds the reverb.
+    reverb: Option<Reverb>,
     counter: u64,
     expr_coef: f32,
     fx: Fx,
@@ -562,13 +609,23 @@ impl BuiltinSynth {
             sr,
             voices: Vec::with_capacity(MAX_VOICES),
             channels: [Channel::default(); 16],
-            reverb: Reverb::new(sr, &Fx::default()),
+            reverb: Some(Reverb::new(sr, &Fx::default())),
             counter: 0,
             expr_coef: 1.0 - (-1.0 / (0.05 * sr)).exp(),
             fx: Fx::default(),
             clock: 0,
         }
     }
+
+    /// Without its own reverb, for the mixer.
+    pub fn dry(sample_rate: u32) -> Self {
+        BuiltinSynth { reverb: None, ..BuiltinSynth::new(sample_rate) }
+    }
+}
+
+/// How quickly a bend glides to a new value, per drift block.
+fn bend_glide(sr: f32) -> f32 {
+    1.0 - (-(DRIFT_BLOCK as f32) / (0.012 * sr)).exp()
 }
 
 impl SynthEngine for BuiltinSynth {
@@ -630,7 +687,9 @@ impl SynthEngine for BuiltinSynth {
             80..=87 => bowed(SAW_LEAD, 0.24),
             98 => struck(GLOCK, 0.28),
             88..=95 => bowed(PAD, 0.28),
-            56..=67 => wind(HORN, 0.3),
+            61..=63 => bowed(SYNTH_BRASS, 0.28),
+            64..=67 => wind(SAX, 0.24),
+            56..=60 => wind(HORN, 0.3),
             68 | 69 => wind(OBOE, 0.26),
             70 => wind(BASSOON, 0.3),
             71 => wind(CLARINET, 0.3),
@@ -665,6 +724,7 @@ impl SynthEngine for BuiltinSynth {
         let c = &mut self.channels[(ch & 15) as usize];
         let x = value as f32 / 127.0;
         match cc {
+            1 => c.vibrato = x,
             7 => c.volume = x,
             11 => c.expr_target = x,
             91 => c.send = x,
@@ -684,7 +744,9 @@ impl SynthEngine for BuiltinSynth {
             *c = Channel::default();
             c.program = program;
         }
-        self.reverb.clear();
+        if let Some(r) = &mut self.reverb {
+            r.clear();
+        }
     }
 
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
@@ -694,11 +756,15 @@ impl SynthEngine for BuiltinSynth {
             c.expr += (c.expr_target - c.expr) * (self.expr_coef * left.len() as f32).min(1.0);
         }
         let mut ratios = [1.0f32; 16];
+        let glide = bend_glide(self.sr);
         for i in 0..left.len() {
-            if self.clock % DRIFT_BLOCK as u64 == 0 {
+            if self.clock % DRIFT_BLOCK as u64 == 0 || i == 0 {
                 let t = self.clock as f64 / self.sr as f64;
                 for (ch, r) in ratios.iter_mut().enumerate() {
-                    *r = 2f32.powf(channel_cents(&self.fx, ch as u8, t) / 1200.0);
+                    let c = &mut self.channels[ch];
+                    c.bend += (c.bend_target - c.bend) * glide;
+                    let cents = channel_cents(&self.fx, ch as u8, t) + c.bend + vibrato_cents(c.vibrato, ch as u8, t);
+                    *r = 2f32.powf(cents / 1200.0);
                 }
             }
             self.clock += 1;
@@ -720,21 +786,39 @@ impl SynthEngine for BuiltinSynth {
                 sl += s * v.pan_l * ch.send;
                 sr += s * v.pan_r * ch.send;
             }
-            let (wl, wr) = self.reverb.process(sl, sr);
-            left[i] = soft_clip((l + wl * WET) * MASTER);
-            right[i] = soft_clip((r + wr * WET) * MASTER);
+            match &mut self.reverb {
+                Some(rev) => {
+                    let (wl, wr) = rev.process(sl, sr);
+                    left[i] = soft_clip((l + wl * WET) * MASTER);
+                    right[i] = soft_clip((r + wr * WET) * MASTER);
+                }
+                None => {
+                    left[i] = l * MASTER;
+                    right[i] = r * MASTER;
+                }
+            }
         }
         self.voices.retain(|v| !(v.released || matches!(v.kind, VoiceKind::Struck(_))) || v.level() > 2e-4);
     }
 
     fn set_fx(&mut self, fx: &Fx) {
         self.fx = *fx;
-        self.reverb.set(fx);
+        if let Some(r) = &mut self.reverb {
+            r.set(fx);
+        }
+    }
+
+    fn bend(&mut self, ch: u8, cents: f32) {
+        self.channels[(ch & 15) as usize].bend_target = cents;
+    }
+
+    fn wet_gain(&self) -> f32 {
+        WET
     }
 }
 
 #[inline]
-fn soft_clip(x: f32) -> f32 {
+pub fn soft_clip(x: f32) -> f32 {
     if x.abs() < 0.6 { x } else { x.signum() * (0.6 + 0.4 * ((x.abs() - 0.6) / 0.4).tanh()) }
 }
 
@@ -744,13 +828,19 @@ fn soft_clip(x: f32) -> f32 {
 /// shared hall reverb used instead, driven by the channels' reverb sends.
 pub struct SoundFontSynth {
     synth: rustysynth::Synthesizer,
-    reverb: Reverb,
+    /// None when the mixer adds the reverb.
+    reverb: Option<Reverb>,
     sends: [f32; 16],
     fx: Fx,
     sr: f32,
     clock: u64,
     /// Pitch bend last sent to each channel.
     bends: [u16; 16],
+    /// Note-expression bend in cents for each channel, and where it is gliding to.
+    expr_bend: [f32; 16],
+    expr_bend_target: [f32; 16],
+    /// Vibrato depth from the modulation wheel, 0..1.
+    vibrato: [f32; 16],
 }
 
 /// Pitch bend range in semitones, GM's default.
@@ -766,20 +856,33 @@ impl SoundFontSynth {
         let sr = sample_rate as f32;
         Ok(Self {
             synth,
-            reverb: Reverb::new(sr, &Fx::default()),
+            reverb: Some(Reverb::new(sr, &Fx::default())),
             sends: [0.4; 16],
             fx: Fx::default(),
             sr,
             clock: 0,
             bends: [8192; 16],
+            expr_bend: [0.0; 16],
+            expr_bend_target: [0.0; 16],
+            vibrato: [0.0; 16],
         })
     }
 
-    /// Bend every channel to its tuning, detune and drift.
+    /// Without its own reverb, for the mixer.
+    pub fn dry(mut self) -> Self {
+        self.reverb = None;
+        self
+    }
+
+    /// Bend every channel to its tuning, detune and drift, and its note
+    /// expression: bends and vibrato.
     fn retune(&mut self) {
         let t = self.clock as f64 / self.sr as f64;
+        let glide = bend_glide(self.sr) * 2.0;
         for ch in 0..16u8 {
-            let cents = channel_cents(&self.fx, ch, t);
+            let c = ch as usize;
+            self.expr_bend[c] += (self.expr_bend_target[c] - self.expr_bend[c]) * glide.min(1.0);
+            let cents = channel_cents(&self.fx, ch, t) + self.expr_bend[c] + vibrato_cents(self.vibrato[c], ch, t);
             let bend = (8192.0 + cents / (BEND_RANGE * 100.0) * 8192.0).round().clamp(0.0, 16383.0) as u16;
             if bend != self.bends[ch as usize] {
                 self.bends[ch as usize] = bend;
@@ -800,6 +903,11 @@ impl SynthEngine for SoundFontSynth {
         if cc == 91 {
             self.sends[(ch & 15) as usize] = value as f32 / 127.0;
         }
+        if cc == 1 {
+            // vibrato is done here, the same for every SoundFont
+            self.vibrato[(ch & 15) as usize] = value as f32 / 127.0;
+            return;
+        }
         self.synth.process_midi_message(ch as i32, 0xB0, cc as i32, value as i32);
     }
     fn program(&mut self, ch: u8, program: u8) {
@@ -808,10 +916,15 @@ impl SynthEngine for SoundFontSynth {
     fn reset(&mut self) {
         self.synth.note_off_all(true);
         self.synth.reset_all_controllers();
-        self.reverb.clear();
+        if let Some(r) = &mut self.reverb {
+            r.clear();
+        }
         self.sends = [0.4; 16];
         // controllers were reset, so the bends must be sent again
         self.bends = [8192; 16];
+        self.expr_bend = [0.0; 16];
+        self.expr_bend_target = [0.0; 16];
+        self.vibrato = [0.0; 16];
     }
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
         // render in short pieces so the drift moves smoothly
@@ -825,86 +938,25 @@ impl SynthEngine for SoundFontSynth {
         }
         // The mix arrives already summed, so one send level (the highest) is used.
         let send = self.sends.iter().fold(0.0f32, |m, s| m.max(*s));
-        for i in 0..left.len() {
-            let (wl, wr) = self.reverb.process(left[i] * send, right[i] * send);
-            left[i] = soft_clip(left[i] + wl * SF_WET);
-            right[i] = soft_clip(right[i] + wr * SF_WET);
+        if let Some(rev) = &mut self.reverb {
+            for i in 0..left.len() {
+                let (wl, wr) = rev.process(left[i] * send, right[i] * send);
+                left[i] = soft_clip(left[i] + wl * SF_WET);
+                right[i] = soft_clip(right[i] + wr * SF_WET);
+            }
         }
     }
     fn set_fx(&mut self, fx: &Fx) {
         self.fx = *fx;
-        self.reverb.set(fx);
-    }
-}
-
-// ------------------------------------------------------------------- mixer
-
-/// Sends each MIDI channel to one of several engines and mixes their output.
-/// Engine 0 is the main engine; the others are SoundFonts chosen for single parts.
-pub struct MixSynth {
-    engines: Vec<Box<dyn SynthEngine>>,
-    route: [usize; 16],
-    tmp_l: Vec<f32>,
-    tmp_r: Vec<f32>,
-}
-
-impl MixSynth {
-    pub fn new(main: Box<dyn SynthEngine>) -> Self {
-        MixSynth { engines: vec![main], route: [0; 16], tmp_l: Vec::new(), tmp_r: Vec::new() }
-    }
-
-    /// Add an engine and return its index, for `route`.
-    pub fn add(&mut self, engine: Box<dyn SynthEngine>) -> usize {
-        self.engines.push(engine);
-        self.engines.len() - 1
-    }
-
-    pub fn route(&mut self, ch: u8, engine: usize) {
-        self.route[(ch & 15) as usize] = engine.min(self.engines.len() - 1);
-    }
-
-    fn engine(&mut self, ch: u8) -> &mut Box<dyn SynthEngine> {
-        &mut self.engines[self.route[(ch & 15) as usize]]
-    }
-}
-
-impl SynthEngine for MixSynth {
-    fn note_on(&mut self, ch: u8, key: u8, vel: u8) {
-        self.engine(ch).note_on(ch, key, vel);
-    }
-    fn note_off(&mut self, ch: u8, key: u8) {
-        self.engine(ch).note_off(ch, key);
-    }
-    fn control(&mut self, ch: u8, cc: u8, value: u8) {
-        self.engine(ch).control(ch, cc, value);
-    }
-    fn program(&mut self, ch: u8, program: u8) {
-        self.engine(ch).program(ch, program);
-    }
-    fn reset(&mut self) {
-        self.engines.iter_mut().for_each(|e| e.reset());
-    }
-    fn set_fx(&mut self, fx: &Fx) {
-        self.engines.iter_mut().for_each(|e| e.set_fx(fx));
-    }
-    fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
-        let (first, rest) = self.engines.split_first_mut().expect("main engine");
-        first.render(left, right);
-        if rest.is_empty() {
-            return;
+        if let Some(r) = &mut self.reverb {
+            r.set(fx);
         }
-        self.tmp_l.resize(left.len(), 0.0);
-        self.tmp_r.resize(left.len(), 0.0);
-        for e in rest {
-            e.render(&mut self.tmp_l, &mut self.tmp_r);
-            for i in 0..left.len() {
-                left[i] += self.tmp_l[i];
-                right[i] += self.tmp_r[i];
-            }
-        }
-        for x in left.iter_mut().chain(right.iter_mut()) {
-            *x = soft_clip(*x);
-        }
+    }
+    fn bend(&mut self, ch: u8, cents: f32) {
+        self.expr_bend_target[(ch & 15) as usize] = cents;
+    }
+    fn wet_gain(&self) -> f32 {
+        SF_WET
     }
 }
 
@@ -943,38 +995,6 @@ mod tests {
         }
     }
 
-    /// Records which engine each event reached.
-    struct Probe(std::sync::Arc<std::sync::Mutex<Vec<(u8, u8)>>>, u8);
-
-    impl SynthEngine for Probe {
-        fn note_on(&mut self, ch: u8, _: u8, _: u8) {
-            self.0.lock().unwrap().push((self.1, ch));
-        }
-        fn note_off(&mut self, _: u8, _: u8) {}
-        fn control(&mut self, _: u8, _: u8, _: u8) {}
-        fn program(&mut self, _: u8, _: u8) {}
-        fn reset(&mut self) {}
-        fn render(&mut self, l: &mut [f32], r: &mut [f32]) {
-            l.fill(0.25);
-            r.fill(0.25);
-        }
-    }
-
-    #[test]
-    fn mix_routes_channels_and_sums() {
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut mix = MixSynth::new(Box::new(Probe(log.clone(), 0)));
-        let second = mix.add(Box::new(Probe(log.clone(), 1)));
-        mix.route(2, second);
-        for ch in 0..4 {
-            mix.note_on(ch, 60, 90);
-        }
-        assert_eq!(*log.lock().unwrap(), vec![(0, 0), (0, 1), (1, 2), (0, 3)]);
-        let (mut l, mut r) = (vec![0.0; 8], vec![0.0; 8]);
-        mix.render(&mut l, &mut r);
-        assert!((l[0] - 0.5).abs() < 1e-6 && (r[7] - 0.5).abs() < 1e-6);
-    }
-
     /// Tuning moves the pitch, and detune and drift keep it near the note.
     #[test]
     fn tuning_and_detune_shift_pitch() {
@@ -1000,3 +1020,4 @@ mod tests {
         assert!((loose - 440.0).abs() <= 15.0);
     }
 }
+

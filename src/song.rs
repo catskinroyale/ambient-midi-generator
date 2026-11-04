@@ -26,10 +26,11 @@ pub enum Style {
     KotoGarden,
     Gamelan,
     Fingerstyle,
+    NeonNoir,
 }
 
 impl Style {
-    pub const ALL: [Style; 20] = [
+    pub const ALL: [Style; 21] = [
         Style::EtherealPads,
         Style::Gymnopedie,
         Style::GenerativeLoops,
@@ -50,6 +51,7 @@ impl Style {
         Style::KotoGarden,
         Style::Gamelan,
         Style::Fingerstyle,
+        Style::NeonNoir,
     ];
 
     pub fn label(self) -> &'static str {
@@ -74,6 +76,7 @@ impl Style {
             Style::KotoGarden => "Koto Garden",
             Style::Gamelan => "Gamelan Shimmer",
             Style::Fingerstyle => "Fingerstyle Guitar",
+            Style::NeonNoir => "Neon Noir",
         }
     }
 
@@ -139,6 +142,10 @@ impl Style {
             Style::Fingerstyle => {
                 "Travis-picked nylon guitar: a steady alternating bass under syncopated treble notes, with soft strings and a simple tune."
             }
+            Style::NeonNoir => {
+                "Electronic, in the spirit of Vangelis's Blade Runner: slow brass swells that sag in pitch as they die away, \
+                 a smoky lead over a deep drone, bells like rain, and a vast, dark hall."
+            }
         }
     }
 
@@ -164,6 +171,7 @@ impl Style {
             Style::KotoGarden => 54.0,
             Style::Gamelan => 72.0,
             Style::Fingerstyle => 76.0,
+            Style::NeonNoir => 56.0,
         }
     }
 
@@ -194,6 +202,8 @@ impl Style {
             Style::BerlinSchool => Some(electronic(98, 88, 81, 38, 45)),
             Style::DubChords => Some(electronic(4, 95, 89, 38, 45)),
             Style::Aurora => Some(electronic(98, 94, 91, 88, 0)),
+            // crystal bells, CS brass, smoky lead, sub bass, analogue pluck
+            Style::NeonNoir => Some(electronic(98, 62, 66, 38, 45)),
             // music box, harp, slow strings, flute, cello
             Style::Lullaby => Some(acoustic(10, 49, 73, 42, 46)),
             // harp, slow strings, flute, cello drone, harp
@@ -206,6 +216,46 @@ impl Style {
             Style::Fingerstyle => Some(acoustic(24, 49, 73, 32, 46)),
             _ => None,
         }
+    }
+
+    /// The effects this style is written for, if they differ from the defaults.
+    pub fn suggested_fx(self) -> Option<Fx> {
+        match self {
+            Style::NeonNoir => Some(Fx {
+                space: Space::Noir,
+                size: 0.6,
+                tone: 0.4,
+                motion: 0.65,
+                predelay: 0.25,
+                drift: 0.15,
+                ensemble: 0.6,
+                echo: Echo {
+                    time: EchoTime::DottedQuarter,
+                    feedback: 0.5,
+                    tone: 0.3,
+                    ping_pong: true,
+                    to_reverb: 0.7,
+                    wow: 0.3,
+                },
+                ..Fx::default()
+            }),
+            _ => None,
+        }
+    }
+
+    /// The mix this style is written for, if it differs from the default: so
+    /// far, only echo sends.
+    pub fn suggested_mix(self) -> Option<Mix> {
+        let sends: &[(Inst, f32)] = match self {
+            Style::NeonNoir => &[(Inst::Violin, 0.4), (Inst::Piano, 0.25)],
+            _ => return None,
+        };
+        let mut mix = Mix::default();
+        for (inst, echo) in sends {
+            let s = mix.strip_of(*inst);
+            mix.strips[s].echo = *echo;
+        }
+        Some(mix)
     }
 
     /// Sounds that suit each part of the style. The first of each is the
@@ -244,6 +294,7 @@ impl Style {
             Style::KotoGarden => pal(&[107, 46, 108], &[89, 52, 94, 49], &[77, 73, 75], &[42, 32], &[107, 46]),
             Style::Gamelan => pal(&[11, 12, 8, 108], &[89, 94, 88, 52], &[75, 73, 77], &[14, 11], &[9, 108, 12, 98]),
             Style::Fingerstyle => pal(&[24, 25, 46], &[49, 89, 48], &[73, 40, 71, 11], &[32, 42], &[46, 24, 11]),
+            Style::NeonNoir => pal(&[98, 4, 0], &[62, 88, 95, 94], &[66, 81, 91], &[38], &[45, 4, 98]),
         }
     }
 }
@@ -354,12 +405,21 @@ pub struct Params {
     pub fx: Fx,
     /// The generator version the recipe was made with, so recipes saved by
     /// earlier versions keep their music. Version 2 added song forms, more
-    /// progressions and arrangement changes between sections.
+    /// progressions and arrangement changes between sections; version 3,
+    /// variants of each style (accompaniment, bass, phrasing ...) chosen by
+    /// the seed, and note expression.
     #[serde(default = "first_version")]
     pub version: u32,
+    /// The mixer: channels, which part plays through which, and the master level.
+    /// Like the effects, it changes the sound, not the notes.
+    #[serde(default)]
+    pub mix: Mix,
+    /// Notes switched off or reshaped in the piano roll.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edits: Vec<NoteEdit>,
 }
 
-pub const GENERATOR_VERSION: u32 = 2;
+pub const GENERATOR_VERSION: u32 = 3;
 
 fn first_version() -> u32 {
     1
@@ -373,10 +433,22 @@ pub enum Space {
     Cathedral,
     Shimmer,
     BlackHole,
+    Plate,
+    Cloud,
+    Noir,
 }
 
 impl Space {
-    pub const ALL: [Space; 5] = [Space::Room, Space::Hall, Space::Cathedral, Space::Shimmer, Space::BlackHole];
+    pub const ALL: [Space; 8] = [
+        Space::Room,
+        Space::Plate,
+        Space::Hall,
+        Space::Cathedral,
+        Space::Noir,
+        Space::Shimmer,
+        Space::Cloud,
+        Space::BlackHole,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -385,6 +457,9 @@ impl Space {
             Space::Cathedral => "Cathedral",
             Space::Shimmer => "Shimmer",
             Space::BlackHole => "Black Hole",
+            Space::Plate => "Plate",
+            Space::Cloud => "Cloud",
+            Space::Noir => "Noir",
         }
     }
 
@@ -395,6 +470,11 @@ impl Space {
             Space::Cathedral => "A large stone space with a long, dark tail",
             Space::Shimmer => "A long hall whose tail rises an octave, like a halo of high strings",
             Space::BlackHole => "Enormous, slowly swirling and almost endless: notes dissolve into a cloud",
+            Space::Plate => "A bright, dense studio plate that blooms at once, with no sense of walls",
+            Space::Cloud => "Granular: the reverb is fed scattered, slightly detuned fragments of what was just played",
+            Space::Noir => {
+                "A vast, dark 1980s digital hall: a long pause before it blooms, then a slow, chorused tail, as on the Blade Runner soundtrack"
+            }
         }
     }
 }
@@ -450,6 +530,274 @@ pub struct Fx {
     /// Detunes the shimmer feedback: 0 = a pure octave; higher splits it into
     /// a sharp and a flat copy that beat against each other.
     pub shimmer_detune: f32,
+    /// The interval the shimmer feedback is pitched by.
+    pub shimmer_interval: Interval,
+    /// Extra delay before the reverb starts: 0 = the space's own, 1 = a quarter second more.
+    pub predelay: f32,
+    /// How much low end is kept out of the reverb: 0 = 40 Hz, 0.5 = 160 Hz, 1 = 640 Hz.
+    pub low_cut: f32,
+    /// Stereo width of the reverb: 0 = mono, 0.5 = natural, 1 = extra wide.
+    pub width: f32,
+    /// How far the reverb ducks under the music while it plays, so the tail
+    /// blooms in the gaps: 0 = off.
+    pub duck: f32,
+    /// Hold the reverb's tail forever and let nothing new in.
+    pub freeze: bool,
+    /// The echo: how much of each part goes into it is set on the mixer.
+    pub echo: Echo,
+    /// A string-machine ensemble chorus over everything but the bass: 0 = off.
+    pub ensemble: f32,
+}
+
+/// The shimmer feedback's pitch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Interval {
+    OctaveUp,
+    FifthUp,
+    TwoOctavesUp,
+    OctaveDown,
+}
+
+impl Interval {
+    pub const ALL: [Interval; 4] = [Interval::OctaveUp, Interval::FifthUp, Interval::TwoOctavesUp, Interval::OctaveDown];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Interval::OctaveUp => "Octave up",
+            Interval::FifthUp => "Fifth up",
+            Interval::TwoOctavesUp => "Two octaves up",
+            Interval::OctaveDown => "Octave down",
+        }
+    }
+
+    pub fn ratio(self) -> f32 {
+        match self {
+            Interval::OctaveUp => 2.0,
+            Interval::FifthUp => 1.5,
+            Interval::TwoOctavesUp => 4.0,
+            Interval::OctaveDown => 0.5,
+        }
+    }
+}
+
+/// A tempo-synced echo, fed from the mixer's echo sends.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Echo {
+    pub time: EchoTime,
+    /// How many repeats: 0 = one, 1 = almost endless.
+    pub feedback: f32,
+    /// Repeats get darker (0) or stay bright (1).
+    pub tone: f32,
+    /// Repeats bounce between left and right.
+    pub ping_pong: bool,
+    /// How much of the echo goes on into the reverb.
+    pub to_reverb: f32,
+    /// Tape-like wobble on the repeats.
+    pub wow: f32,
+}
+
+impl Default for Echo {
+    fn default() -> Self {
+        Echo { time: EchoTime::DottedEighth, feedback: 0.45, tone: 0.4, ping_pong: true, to_reverb: 0.5, wow: 0.2 }
+    }
+}
+
+/// Echo time in beats (quarter notes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EchoTime {
+    Eighth,
+    DottedEighth,
+    Quarter,
+    DottedQuarter,
+    Half,
+}
+
+impl EchoTime {
+    pub const ALL: [EchoTime; 5] =
+        [EchoTime::Eighth, EchoTime::DottedEighth, EchoTime::Quarter, EchoTime::DottedQuarter, EchoTime::Half];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EchoTime::Eighth => "1/8",
+            EchoTime::DottedEighth => "Dotted 1/8",
+            EchoTime::Quarter => "1/4",
+            EchoTime::DottedQuarter => "Dotted 1/4",
+            EchoTime::Half => "1/2",
+        }
+    }
+
+    pub fn beats(self) -> f64 {
+        match self {
+            EchoTime::Eighth => 0.5,
+            EchoTime::DottedEighth => 0.75,
+            EchoTime::Quarter => 1.0,
+            EchoTime::DottedQuarter => 1.5,
+            EchoTime::Half => 2.0,
+        }
+    }
+}
+
+/// The most mixer channels there can be.
+pub const MAX_STRIPS: usize = 8;
+
+/// One mixer channel. Any number of parts can play through it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Strip {
+    pub name: String,
+    /// Fader level in dB; -60 is silent.
+    pub gain_db: f32,
+    /// -1 = left, 1 = right.
+    pub pan: f32,
+    /// Stereo width: 0 = mono, 1 = as played, 2 = wider.
+    pub width: f32,
+    /// Reverb send: 0.5 is the piece's reverb amount, 1 doubles it.
+    pub reverb: f32,
+    /// Echo send.
+    pub echo: f32,
+    pub mute: bool,
+    pub solo: bool,
+}
+
+impl Default for Strip {
+    fn default() -> Self {
+        Strip { name: String::new(), gain_db: 0.0, pan: 0.0, width: 1.0, reverb: 0.5, echo: 0.0, mute: false, solo: false }
+    }
+}
+
+pub const SILENT_DB: f32 = -60.0;
+
+impl Strip {
+    pub fn named(name: &str) -> Self {
+        Strip { name: name.to_string(), ..Strip::default() }
+    }
+
+    /// The fader as a linear gain.
+    pub fn gain(&self) -> f32 {
+        if self.gain_db <= SILENT_DB { 0.0 } else { 10f32.powf(self.gain_db / 20.0) }
+    }
+}
+
+/// The mixer. Each part plays through one channel (strip); several parts can
+/// share one, so a single fader moves them together.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Mix {
+    pub strips: Vec<Strip>,
+    /// The strip each part plays through, by index into `strips`.
+    pub routes: Vec<(Inst, usize)>,
+    pub master_db: f32,
+}
+
+impl Default for Mix {
+    fn default() -> Self {
+        Mix {
+            strips: Inst::ALL.iter().map(|i| Strip::named(i.role())).collect(),
+            routes: Inst::ALL.iter().enumerate().map(|(n, i)| (*i, n)).collect(),
+            master_db: 0.0,
+        }
+    }
+}
+
+impl Mix {
+    /// The strip a part plays through.
+    pub fn strip_of(&self, inst: Inst) -> usize {
+        let fallback = Inst::ALL.iter().position(|i| *i == inst).unwrap_or(0);
+        let s = self.routes.iter().find(|(i, _)| *i == inst).map_or(fallback, |(_, s)| *s);
+        s.min(self.strips.len().saturating_sub(1))
+    }
+
+    pub fn set_route(&mut self, inst: Inst, strip: usize) {
+        self.routes.retain(|(i, _)| *i != inst);
+        self.routes.push((inst, strip));
+        self.routes.sort();
+    }
+
+    /// Whether a strip is heard, given the mutes and solos.
+    pub fn audible(&self, strip: usize) -> bool {
+        let any_solo = self.strips.iter().any(|s| s.solo);
+        self.strips.get(strip).is_some_and(|s| !s.mute && (!any_solo || s.solo))
+    }
+
+    /// Add a channel, returning its index, unless there are already as many as allowed.
+    pub fn add_strip(&mut self) -> Option<usize> {
+        if self.strips.len() >= MAX_STRIPS {
+            return None;
+        }
+        self.strips.push(Strip::named(&format!("Bus {}", self.strips.len() + 1)));
+        Some(self.strips.len() - 1)
+    }
+
+    /// Remove a channel; its parts move to the first channel.
+    pub fn remove_strip(&mut self, strip: usize) {
+        if self.strips.len() <= 1 || strip >= self.strips.len() {
+            return;
+        }
+        self.strips.remove(strip);
+        for inst in Inst::ALL {
+            let s = self.strip_of_raw(inst);
+            let s = match s {
+                Some(s) if s == strip => 0,
+                Some(s) if s > strip => s - 1,
+                Some(s) => s,
+                None => continue,
+            };
+            self.set_route(inst, s);
+        }
+    }
+
+    fn strip_of_raw(&self, inst: Inst) -> Option<usize> {
+        self.routes.iter().find(|(i, _)| *i == inst).map(|(_, s)| *s)
+    }
+}
+
+/// How a single note is shaped while it sounds. The shapes are written as
+/// controllers on the part's channel, so on parts that play chords they shape
+/// every note sounding at the time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Expr {
+    /// Volume over the note: below 0 it fades away, above 0 it swells up and back.
+    pub swell: f32,
+    /// Vibrato depth, which comes in a little after the note starts: 0..1.
+    pub vibrato: f32,
+    /// Above 0 the note slides up into pitch from below; below 0 it falls away at the end.
+    pub bend: f32,
+}
+
+impl Expr {
+    pub fn is_plain(&self) -> bool {
+        self.swell == 0.0 && self.vibrato == 0.0 && self.bend == 0.0
+    }
+}
+
+/// A change made to one note in the piano roll. Notes are found by part, start
+/// and key; the edit only applies to the piece it was made on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NoteEdit {
+    /// `Params::piece_id` of the piece the note belongs to.
+    pub piece: u64,
+    pub inst: Inst,
+    pub start: u32,
+    pub key: u8,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vel: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expr: Option<Expr>,
+}
+
+impl NoteEdit {
+    pub fn matches(&self, n: &Note) -> bool {
+        self.inst == n.inst && self.start == n.start && self.key == n.key
+    }
+
+    /// An edit that no longer changes anything.
+    pub fn is_empty(&self) -> bool {
+        !self.off && self.vel.is_none() && self.expr.is_none()
+    }
 }
 
 impl Default for Fx {
@@ -464,6 +812,14 @@ impl Default for Fx {
             tuning: Tuning::A440,
             shimmer: 0.5,
             shimmer_detune: 0.0,
+            shimmer_interval: Interval::OctaveUp,
+            predelay: 0.0,
+            low_cut: 0.5,
+            width: 0.5,
+            duck: 0.0,
+            freeze: false,
+            echo: Echo::default(),
+            ensemble: 0.0,
         }
     }
 }
@@ -562,9 +918,11 @@ pub const SOUNDS: &[Sound] = &[
     snd(38, "Synth Bass", "Synth"),
     snd(81, "Saw Lead", "Synth"),
     snd(98, "Crystal", "Synth"),
+    snd(62, "Synth Brass", "Synth"),
     snd(73, "Flute", "Winds"),
     snd(75, "Pan Flute", "Winds"),
     snd(77, "Shakuhachi", "Winds"),
+    snd(66, "Tenor Sax", "Winds"),
     snd(71, "Clarinet", "Winds"),
     snd(68, "Oboe", "Winds"),
     snd(70, "Bassoon", "Winds"),
@@ -606,6 +964,8 @@ impl Default for Params {
             fonts: Vec::new(),
             fx: Fx::default(),
             version: GENERATOR_VERSION,
+            mix: Mix::default(),
+            edits: Vec::new(),
         }
     }
 }
@@ -648,9 +1008,50 @@ impl Params {
         }
     }
 
-    /// Whether two settings give the same notes (they may still sound different).
+    /// Whether two settings give the same song (they may still sound
+    /// different: the effects and mixer apply while playing).
     pub fn same_music(&self, other: &Params) -> bool {
-        Params { fx: other.fx, ..self.clone() } == *other
+        Params { fx: other.fx, mix: other.mix.clone(), ..self.clone() } == *other
+    }
+
+    /// Identifies the notes a piece has, whatever its sounds, effects, mix or
+    /// note edits, so edits made on it can be found again.
+    pub fn piece_id(&self) -> u64 {
+        let notes = Params {
+            sounds: Sounds::default(),
+            muted: Vec::new(),
+            fonts: Vec::new(),
+            fx: Fx::default(),
+            reverb: 0.0,
+            mix: Mix::default(),
+            edits: Vec::new(),
+            ..self.clone()
+        };
+        crate::rng::hash_str(&serde_json::to_string(&notes).unwrap_or_default())
+    }
+
+    /// The edits made on this piece.
+    pub fn piece_edits(&self) -> impl Iterator<Item = &NoteEdit> {
+        let id = self.piece_id();
+        self.edits.iter().filter(move |e| e.piece == id)
+    }
+
+    /// The edit for a note of this piece, made if there isn't one yet.
+    pub fn edit_mut(&mut self, n: &Note) -> &mut NoteEdit {
+        let piece = self.piece_id();
+        let i = match self.edits.iter().position(|e| e.piece == piece && e.matches(n)) {
+            Some(i) => i,
+            None => {
+                self.edits.push(NoteEdit { piece, inst: n.inst, start: n.start, key: n.key, off: false, vel: None, expr: None });
+                self.edits.len() - 1
+            }
+        };
+        &mut self.edits[i]
+    }
+
+    /// Drop edits that no longer change anything.
+    pub fn tidy_edits(&mut self) {
+        self.edits.retain(|e| !e.is_empty());
     }
 
     pub fn to_recipe(&self) -> String {
@@ -752,6 +1153,13 @@ pub struct Ctrl {
     pub value: u8,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Bend {
+    pub tick: u32,
+    pub inst: Inst,
+    pub cents: i16,
+}
+
 #[derive(Clone, Debug)]
 pub struct Song {
     pub params: Params,
@@ -761,6 +1169,12 @@ pub struct Song {
     pub bars: u32,
     pub notes: Vec<Note>,
     pub ctrls: Vec<Ctrl>,
+    /// Pitch bends, in cents, for note expression.
+    pub bends: Vec<Bend>,
+    /// The expression of each note in `notes`, in the same order.
+    pub exprs: Vec<Expr>,
+    /// Notes switched off in the piano roll, kept so they can be switched on again.
+    pub off: Vec<Note>,
     /// (tick, chord name) for display
     pub chords: Vec<(u32, String)>,
     /// Every part the arrangement uses, including muted ones.

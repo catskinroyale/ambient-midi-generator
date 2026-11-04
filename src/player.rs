@@ -16,6 +16,8 @@ pub enum Kind {
     /// Bank select, then program change.
     Program(u8, u8),
     Ctrl(u8, u8),
+    /// Pitch bend in cents.
+    Bend(i16),
     On(u8, u8),
     Off(u8),
 }
@@ -38,7 +40,10 @@ struct Span {
 
 pub struct Timeline {
     events: Vec<Event>,
+    /// Sustained notes, restarted when playback jumps into the middle of them.
     spans: Vec<Span>,
+    /// Every note.
+    notes: Vec<Span>,
     pub duration: f64,
 }
 
@@ -55,26 +60,32 @@ impl Timeline {
         for c in &song.ctrls {
             events.push(Event { time: song.tick_to_secs(c.tick), ch: c.inst.channel(), kind: Kind::Ctrl(c.cc, c.value) });
         }
+        for b in &song.bends {
+            events.push(Event { time: song.tick_to_secs(b.tick), ch: b.inst.channel(), kind: Kind::Bend(b.cents) });
+        }
         let mut spans = Vec::new();
+        let mut notes = Vec::new();
         for n in &song.notes {
             let start = song.tick_to_secs(n.start);
             let end = song.tick_to_secs(n.end());
             let ch = n.inst.channel();
             events.push(Event { time: start, ch, kind: Kind::On(n.key, n.vel) });
             events.push(Event { time: end, ch, kind: Kind::Off(n.key) });
+            let span = Span { start, end, ch, key: n.key, vel: n.vel };
             if song.sustains(n.inst) {
-                spans.push(Span { start, end, ch, key: n.key, vel: n.vel });
+                spans.push(span);
             }
+            notes.push(span);
         }
         let order = |k: &Kind| match k {
             Kind::Program(..) => 0,
             Kind::Off(_) => 1,
-            Kind::Ctrl(..) => 2,
+            Kind::Ctrl(..) | Kind::Bend(_) => 2,
             Kind::On(..) => 3,
         };
         events.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap().then(order(&a.kind).cmp(&order(&b.kind))));
         let duration = song.duration_secs() + REVERB_TAIL;
-        Timeline { events, spans, duration }
+        Timeline { events, spans, notes, duration }
     }
 }
 
@@ -114,6 +125,7 @@ impl Sequencer {
                     self.engine.program(e.ch, p);
                 }
                 Kind::Ctrl(c, v) => self.engine.control(e.ch, c, v),
+                Kind::Bend(c) => self.engine.bend(e.ch, c as f32),
                 _ => {}
             }
             self.idx += 1;
@@ -123,6 +135,30 @@ impl Sequencer {
                 self.engine.note_on(s.ch, s.key, s.vel);
             }
         }
+    }
+
+    /// Carry on with a timeline that differs only in some notes, without
+    /// stopping what is sounding: notes that have gone are let go, and notes
+    /// that came back join in.
+    pub fn swap_timeline(&mut self, tl: Arc<Timeline>) {
+        let pos = self.pos;
+        let sounding = |t: &Timeline| -> Vec<Span> {
+            t.notes.iter().filter(|s| s.start < pos && s.end > pos).copied().collect()
+        };
+        let same = |a: &Span, b: &Span| a.ch == b.ch && a.key == b.key && (a.start - b.start).abs() < 1e-6;
+        if let Some(old) = &self.timeline {
+            let (was, now) = (sounding(old), sounding(&tl));
+            for s in was.iter().filter(|s| !now.iter().any(|n| same(n, s))) {
+                self.engine.note_off(s.ch, s.key);
+            }
+            for s in now.iter().filter(|s| !was.iter().any(|w| same(w, s))) {
+                if tl.spans.iter().any(|x| same(x, s)) {
+                    self.engine.note_on(s.ch, s.key, s.vel);
+                }
+            }
+        }
+        self.idx = tl.events.partition_point(|e| e.time < pos);
+        self.timeline = Some(tl);
     }
 
     /// Render into the buffers, advancing the playhead. Returns false once the
@@ -142,6 +178,7 @@ impl Sequencer {
                             self.engine.program(e.ch, p);
                         }
                         Kind::Ctrl(c, v) => self.engine.control(e.ch, c, v),
+                        Kind::Bend(c) => self.engine.bend(e.ch, c as f32),
                         Kind::On(k, v) => self.engine.note_on(e.ch, k, v),
                         Kind::Off(k) => self.engine.note_off(e.ch, k),
                     }
@@ -163,6 +200,8 @@ impl Sequencer {
 
 pub enum Cmd {
     SetTimeline(Arc<Timeline>, f64),
+    /// The same piece with some notes edited: carry on without restarting.
+    SwapTimeline(Arc<Timeline>),
     SetEngine(Box<dyn SynthEngine>),
     Play,
     Pause,
@@ -170,6 +209,8 @@ pub enum Cmd {
     Volume(f32),
     Looping(bool),
     SetFx(crate::song::Fx),
+    /// The mixer, and the tempo for the echo.
+    SetMix(crate::song::Mix, f64),
 }
 
 pub struct Player {
@@ -257,6 +298,7 @@ impl AudioState {
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
                 Cmd::SetTimeline(tl, at) => self.seq.set_timeline(tl, at),
+                Cmd::SwapTimeline(tl) => self.seq.swap_timeline(tl),
                 Cmd::SetEngine(e) => {
                     let pos = self.seq.pos;
                     self.seq.engine = e;
@@ -279,6 +321,7 @@ impl AudioState {
                 Cmd::Volume(v) => self.volume = v,
                 Cmd::Looping(l) => self.looping = l,
                 Cmd::SetFx(fx) => self.seq.engine.set_fx(&fx),
+                Cmd::SetMix(mix, bpm) => self.seq.engine.set_mix(&mix, bpm),
             }
         }
         let frames = data.len() / channels.max(1);
@@ -471,7 +514,8 @@ mod soundfont_tests {
     fn part_plays_through_its_own_soundfont() {
         use crate::fonts::LoadedFont;
         use crate::song::Inst;
-        use crate::synth::{BuiltinSynth, MixSynth};
+        use crate::mixer::{Meters, Mixer};
+        use crate::synth::BuiltinSynth;
         let Ok(font) = LoadedFont::load(std::path::Path::new("soundfonts/GeneralUser-GS.sf2")) else { return };
         let harp = font.presets.iter().find(|p| p.bank == 0 && p.preset == 46).unwrap();
         let mut p = Params { style: Style::CinematicSwell, target_seconds: 40.0, ..Params::default() };
@@ -485,10 +529,13 @@ mod soundfont_tests {
         assert_eq!(song.sound_name(pad), harp.name);
 
         let render = |route: bool| {
-            let mut mix = MixSynth::new(Box::new(BuiltinSynth::new(44100)));
-            if route {
-                let i = mix.add(Box::new(SoundFontSynth::new(&font.font, 44100).unwrap()));
-                mix.route(pad.channel(), i);
+            let mut mix = Mixer::new(44100, Meters::new());
+            for inst in Inst::ALL {
+                if route && inst == pad {
+                    mix.add_part(inst.channel(), Box::new(SoundFontSynth::new(&font.font, 44100).unwrap().dry()));
+                } else {
+                    mix.add_part(inst.channel(), Box::new(BuiltinSynth::dry(44100)));
+                }
             }
             let mut seq = Sequencer::new(Box::new(mix), 44100);
             seq.set_timeline(Arc::new(Timeline::from_song(&song)), 0.0);

@@ -13,8 +13,13 @@ pub const RECIPE_PREFIX: &str = "midigen-recipe:";
 enum Ev {
     Off(u8),
     Ctrl(u8, u8),
+    /// Pitch bend in cents.
+    Bend(i16),
     On(u8, u8),
 }
+
+/// Pitch bend range in cents (General MIDI's default of two semitones).
+const BEND_RANGE_CENTS: f32 = 200.0;
 
 pub fn to_bytes(song: &Song) -> std::io::Result<Vec<u8>> {
     let title = song.params.title();
@@ -42,8 +47,25 @@ pub fn to_bytes(song: &Song) -> std::io::Result<Vec<u8>> {
     for (inst, name) in &names {
         let ch = u4::new(inst.channel());
         let mut abs: Vec<(u32, Ev)> = Vec::new();
+        // The mixer's fader, pan and reverb send are written into the part's
+        // volume, pan and reverb controllers. Its mute and solo are left out:
+        // they are for listening, and every part is kept.
+        let mix = &song.params.mix;
+        let strip = mix.strips.get(mix.strip_of(*inst));
+        let gain = strip.map_or(1.0, |s| s.gain());
+        let send = strip.map_or(1.0, |s| s.reverb * 2.0);
+        let pan = strip.map_or(0.0, |s| s.pan);
+        abs.push((0, Ev::Ctrl(10, (64.0 + pan * 63.5).round().clamp(0.0, 127.0) as u8)));
         for c in song.ctrls.iter().filter(|c| c.inst == *inst) {
-            abs.push((c.tick, Ev::Ctrl(c.cc, c.value)));
+            let value = match c.cc {
+                7 => (c.value as f32 * gain).round().clamp(0.0, 127.0) as u8,
+                91 => (c.value as f32 * send).round().clamp(0.0, 127.0) as u8,
+                _ => c.value,
+            };
+            abs.push((c.tick, Ev::Ctrl(c.cc, value)));
+        }
+        for b in song.bends.iter().filter(|b| b.inst == *inst) {
+            abs.push((b.tick, Ev::Bend(b.cents)));
         }
         for n in song.notes.iter().filter(|n| n.inst == *inst) {
             abs.push((n.start, Ev::On(n.key, n.vel)));
@@ -53,7 +75,7 @@ pub fn to_bytes(song: &Song) -> std::io::Result<Vec<u8>> {
         abs.sort_by_key(|(t, e)| {
             (*t, match e {
                 Ev::Off(_) => 0,
-                Ev::Ctrl(..) => 1,
+                Ev::Ctrl(..) | Ev::Bend(_) => 1,
                 Ev::On(..) => 2,
             })
         });
@@ -82,6 +104,10 @@ pub fn to_bytes(song: &Song) -> std::io::Result<Vec<u8>> {
                 Ev::Off(k) => MidiMessage::NoteOff { key: u7::new(k), vel: u7::new(0) },
                 Ev::On(k, v) => MidiMessage::NoteOn { key: u7::new(k), vel: u7::new(v.max(1)) },
                 Ev::Ctrl(c, v) => MidiMessage::Controller { controller: u7::new(c), value: u7::new(v) },
+                Ev::Bend(cents) => {
+                    let v = (cents as f32 / BEND_RANGE_CENTS * 8192.0).round().clamp(-8192.0, 8191.0) as i16;
+                    MidiMessage::PitchBend { bend: midly::PitchBend::from_int(v) }
+                }
             };
             track.push(TrackEvent {
                 delta: u28::new(t - last),

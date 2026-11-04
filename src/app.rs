@@ -14,13 +14,16 @@ use crate::fonts::{FontSource, LoadedFont};
 use crate::project::{self, FontEntry, Project};
 use crate::generator::generate;
 use crate::midi_export;
+use crate::mixer::{Meters, Mixer};
+use crate::mixer_ui::{MixerView, PartInfo};
 use crate::player::{Cmd, Player, Timeline, render_wav};
 use crate::rng::Rng;
 use crate::slideshow::{self, Fit, Grid, Plan, Slideshow};
 use crate::song::{
-    ELECTRONIC_FONT, Fx, Inst, Instrumentation, LengthMode, Params, SOUNDS, Song, Sounds, Space, Style, Tuning, sound_name,
+    ELECTRONIC_FONT, EchoTime, Expr, Fx, Inst, Instrumentation, Interval, LengthMode, Mix, Note, Params, SOUNDS, Song,
+    Sounds, Space, Style, Tuning, sound_name,
 };
-use crate::synth::{BuiltinSynth, MixSynth, SoundFontSynth, SynthEngine};
+use crate::synth::{BuiltinSynth, SoundFontSynth, SynthEngine};
 use crate::theory::{Mode, NOTE_NAMES};
 use crate::update::{self, UpdateStatus};
 
@@ -78,6 +81,21 @@ pub struct App {
     title: String,
     /// Set for automated UI checks (MIDIGEN_SCREENSHOT).
     snapshot: Option<crate::snapshot::Snapshot>,
+    /// Levels measured by the playback mixer, for its meters.
+    meters: Arc<Meters>,
+    mixer_view: MixerView,
+    show_mixer: bool,
+    /// The mixer and tempo last sent to the player.
+    sent_mix: Option<(Mix, f64)>,
+    /// Clicking notes in the piano roll switches them off and on.
+    edit_notes: bool,
+    /// The part of the piece the piano roll shows, as fractions of its length.
+    roll_view: (f64, f64),
+    /// The note whose menu is open.
+    note_menu: Option<Note>,
+    /// While dragging across notes: whether they are being switched off, and
+    /// which have been reached so far.
+    paint: Option<(bool, Vec<(Inst, u32, u8)>)>,
 }
 
 /// Settings remembered between sessions.
@@ -85,6 +103,7 @@ const KEY_THEME: &str = "theme";
 const KEY_CHECK_UPDATES: &str = "check_updates";
 const KEY_SLIDESHOW: &str = "slideshow";
 const KEY_VARY_SOUNDS: &str = "vary_sounds";
+const KEY_SHOW_MIXER: &str = "show_mixer";
 
 
 /// What the audio engine was built from: the main font, and which channels go
@@ -176,6 +195,7 @@ impl App {
         let check_updates = storage.and_then(|s| eframe::get_value(s, KEY_CHECK_UPDATES)).unwrap_or(true);
         let slideshow = storage.and_then(|s| eframe::get_value(s, KEY_SLIDESHOW)).unwrap_or_default();
         let vary_sounds = storage.and_then(|s| eframe::get_value(s, KEY_VARY_SOUNDS)).unwrap_or(true);
+        let show_mixer = storage.and_then(|s| eframe::get_value(s, KEY_SHOW_MIXER)).unwrap_or(false);
         theme::install(&cc.egui_ctx);
         cc.egui_ctx.set_theme(theme);
         let params = Params::default();
@@ -224,6 +244,14 @@ impl App {
             project_path: None,
             title: String::new(),
             snapshot: crate::snapshot::Snapshot::from_env(),
+            meters: Meters::new(),
+            mixer_view: MixerView::default(),
+            show_mixer,
+            sent_mix: None,
+            edit_notes: false,
+            roll_view: (0.0, 1.0),
+            note_menu: None,
+            paint: None,
         };
         if let Some(s) = &app.snapshot {
             if s.wants("sections") {
@@ -244,6 +272,16 @@ impl App {
             if s.wants("sound") {
                 widgets::set_open(&cc.egui_ctx, &["piece", "recipe"], false);
                 widgets::set_open(&cc.egui_ctx, &["parts", "fx", "fonts"], true);
+            }
+            if s.wants("effects") {
+                widgets::set_open(&cc.egui_ctx, &["piece", "parts", "slideshow", "fonts", "recipe"], false);
+                widgets::set_open(&cc.egui_ctx, &["fx"], true);
+                app.params.fx.space = Space::Shimmer;
+            }
+            app.show_mixer |= s.wants("mixer");
+            app.edit_notes = s.wants("edit");
+            if s.wants("zoom") {
+                app.roll_view = (0.3, 0.55);
             }
 
             app.about.open = s.wants("about") || s.wants("libraries");
@@ -268,10 +306,13 @@ impl App {
         if !app.fonts.is_empty() {
             app.status = format!("Loaded {} SoundFonts", app.fonts.len());
         }
-        if app.snapshot.as_ref().is_some_and(|s| s.wants("electronic")) {
+        let snap_style = app.snapshot.as_ref().and_then(|s| {
+            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir)].into_iter().find(|(o, _)| s.wants(o)).map(|(_, st)| st)
+        });
+        if let Some(style) = snap_style {
             let old = app.params.style;
-            app.params.style = Style::BerlinSchool;
-            app.params.tempo = Style::BerlinSchool.default_tempo();
+            app.params.style = style;
+            app.params.tempo = style.default_tempo();
             app.apply_style_sounds(old);
             app.regenerate();
         }
@@ -290,13 +331,19 @@ impl App {
             .map(|(i, f)| format!("{} ({})", i.role(), f.font))
             .collect();
         self.params.fonts.retain(|(_, f)| self.fonts.iter().any(|l| l.name == f.font));
+        // only notes edited: playback carries on without a break
+        let edits_only = Params { edits: self.params.edits.clone(), ..self.generated_from.clone() }.same_music(&self.params);
         self.song = generate(&self.params);
         self.timeline = Arc::new(Timeline::from_song(&self.song));
         self.generated_from = self.params.clone();
         self.recipe_text = self.params.to_recipe();
         if let Some(p) = &self.player {
-            let pos = p.position().min(self.timeline.duration - 0.5).max(0.0);
-            p.send(Cmd::SetTimeline(self.timeline.clone(), pos));
+            if edits_only {
+                p.send(Cmd::SwapTimeline(self.timeline.clone()));
+            } else {
+                let pos = p.position().min(self.timeline.duration - 0.5).max(0.0);
+                p.send(Cmd::SetTimeline(self.timeline.clone(), pos));
+            }
         }
         self.status = format!(
             "Generated {} notes · {} bars · {}",
@@ -356,29 +403,20 @@ impl App {
         (self.fonts_version, self.main_font.clone(), routes)
     }
 
-    /// The main engine, plus a SoundFont synth for each other font a part uses.
-    fn engine_for(&self, sr: u32) -> Result<Box<dyn SynthEngine>, String> {
-        let main: Box<dyn SynthEngine> = match self.main_font.as_deref().and_then(|n| self.font(n)) {
-            Some(f) => Box::new(SoundFontSynth::new(&f.font, sr)?),
-            None => Box::new(BuiltinSynth::new(sr)),
-        };
-        let mut mix = MixSynth::new(main);
-        let mut added: Vec<(&str, usize)> = Vec::new();
-        for (inst, fp) in &self.song.params.fonts {
-            if Some(&fp.font) == self.main_font.as_ref() {
-                continue; // the main font plays it, with the part's bank and program
-            }
-            let Some(f) = self.font(&fp.font) else { continue };
-            let idx = match added.iter().find(|(n, _)| *n == fp.font) {
-                Some((_, i)) => *i,
-                None => {
-                    let i = mix.add(Box::new(SoundFontSynth::new(&f.font, sr)?));
-                    added.push((&fp.font, i));
-                    i
-                }
+    /// The mixer, with an engine for each part: its own SoundFont if it has
+    /// one, else the main SoundFont, else the built-in synth.
+    fn engine_for(&self, sr: u32, meters: Arc<Meters>) -> Result<Box<dyn SynthEngine>, String> {
+        let main = self.main_font.as_deref().and_then(|n| self.font(n));
+        let mut mix = Mixer::new(sr, meters);
+        for inst in Inst::ALL {
+            let own = self.song.params.font(inst).and_then(|fp| self.font(&fp.font));
+            let engine: Box<dyn SynthEngine> = match own.or(main) {
+                Some(f) => Box::new(SoundFontSynth::new(&f.font, sr)?.dry()),
+                None => Box::new(BuiltinSynth::dry(sr)),
             };
-            mix.route(inst.channel(), idx);
+            mix.add_part(inst.channel(), engine);
         }
+        mix.set_mix(&self.params.mix, self.song.bpm);
         mix.set_fx(&self.params.fx);
         Ok(Box::new(mix))
     }
@@ -391,7 +429,7 @@ impl App {
         }
         self.engine_sig = Some(sig);
         if let Some(p) = &self.player {
-            match self.engine_for(p.sample_rate) {
+            match self.engine_for(p.sample_rate, self.meters.clone()) {
                 Ok(e) => p.send(Cmd::SetEngine(e)),
                 Err(e) => self.status = e,
             }
@@ -433,6 +471,28 @@ impl App {
         if let Some(p) = &self.player {
             p.send(Cmd::SetFx(self.params.fx));
         }
+    }
+
+    /// Send a changed mixer, or the tempo its echo follows, to the player.
+    fn sync_mix(&mut self) {
+        let now = (self.params.mix.clone(), self.song.bpm);
+        if self.sent_mix.as_ref() == Some(&now) {
+            return;
+        }
+        if let Some(p) = &self.player {
+            p.send(Cmd::SetMix(now.0.clone(), now.1));
+        }
+        self.recipe_text = self.params.to_recipe();
+        self.sent_mix = Some(now);
+    }
+
+    /// The song with the mixer and effects as they are now (they change
+    /// without regenerating), for saving.
+    fn song_as_heard(&self) -> Song {
+        let mut song = self.song.clone();
+        song.params.mix = self.params.mix.clone();
+        song.params.fx = self.params.fx;
+        song
     }
 
     fn load_soundfont(&mut self) {
@@ -732,7 +792,7 @@ impl App {
         else {
             return;
         };
-        self.status = match midi_export::save(&self.song, &path) {
+        self.status = match midi_export::save(&self.song_as_heard(), &path) {
             Ok(()) => format!("Saved {}", path.display()),
             Err(e) => format!("Save failed: {e}"),
         };
@@ -762,7 +822,7 @@ impl App {
         else {
             return;
         };
-        let engine = match self.engine_for(44100) {
+        let engine = match self.engine_for(44100, Meters::new()) {
             Ok(e) => e,
             Err(e) => {
                 self.status = e;
@@ -770,7 +830,7 @@ impl App {
             }
         };
         let progress = Arc::new(AtomicU32::new(0));
-        let song = self.song.clone();
+        let song = self.song_as_heard();
         let (pr, p2) = (progress.clone(), path.clone());
         let handle = std::thread::spawn(move || render_wav(&song, engine, 44100, &p2, &pr));
         self.export = Some(Export { progress, handle: Some(handle), path });
@@ -782,7 +842,7 @@ impl App {
         widgets::section(ui, "piece", "Piece", true, |ui| self.piece_ui(ui));
         widgets::section(ui, "slideshow", "Slideshow", false, |ui| self.slideshow_ui(ui));
         widgets::section(ui, "parts", "Parts", true, |ui| self.parts_ui(ui));
-        widgets::section(ui, "fx", "Reverb & Tuning", false, |ui| self.fx_ui(ui));
+        widgets::section(ui, "fx", "Effects & Tuning", false, |ui| self.fx_ui(ui));
         widgets::section(ui, "fonts", "Sound Fonts", false, |ui| self.sound_ui(ui));
         widgets::section(ui, "recipe", "Recipe", false, |ui| self.recipe_ui(ui));
     }
@@ -1241,6 +1301,7 @@ impl App {
     /// electronic styles play the bundled Ambient Electronic SoundFont), or back to
     /// the defaults when leaving a style that had its own.
     fn apply_style_sounds(&mut self, old: Style) {
+        self.apply_style_fx(old);
         if self.vary_sounds {
             // sync_seed_sounds picks them
             return;
@@ -1251,6 +1312,18 @@ impl App {
         }
         self.params.sounds = new.map_or_else(Sounds::default, |s| s.sounds);
         self.route_electronic();
+    }
+
+    /// After a style change: switch to the new style's effects and echo sends
+    /// (Neon Noir has its own), unless they were changed by hand.
+    fn apply_style_fx(&mut self, old: Style) {
+        let p = &mut self.params;
+        if p.fx == old.suggested_fx().unwrap_or_default() {
+            p.fx = p.style.suggested_fx().unwrap_or_default();
+        }
+        if p.mix == old.suggested_mix().unwrap_or_default() {
+            p.mix = p.style.suggested_mix().unwrap_or_default();
+        }
     }
 
     /// Route the parts of an electronic style to the Ambient Electronic
@@ -1407,10 +1480,67 @@ impl App {
                 "Feedback detune",
                 &mut p.fx.shimmer_detune,
                 ("pure", "wide"),
-                "Splits the shimmer feedback into a sharp and a flat copy, up to 35 cents either side of the octave, \
+                "Splits the shimmer feedback into a sharp and a flat copy, up to 35 cents either side of the interval, \
                  so they beat and spread for more depth",
             );
+            widgets::dropdown(ui, "interval", "Interval", p.fx.shimmer_interval.label(), "What the tail is pitched to", |ui| {
+                for i in Interval::ALL {
+                    ui.selectable_value(&mut p.fx.shimmer_interval, i, i.label());
+                }
+            });
         }
+        amount(
+            ui,
+            "predelay",
+            "Pre-delay",
+            &mut p.fx.predelay,
+            ("the space's", "+250 ms"),
+            "A gap before the reverb starts, so each note is heard clearly before its tail",
+        );
+        amount(
+            ui,
+            "low_cut",
+            "Low cut",
+            &mut p.fx.low_cut,
+            ("40 Hz", "640 Hz"),
+            "Keeps low notes out of the reverb so the bass stays clear (160 Hz in the middle)",
+        );
+        amount(ui, "width", "Width", &mut p.fx.width, ("mono", "extra wide"), "How wide the reverb spreads between the speakers");
+        amount(
+            ui,
+            "duck",
+            "Ducking",
+            &mut p.fx.duck,
+            ("off", "deep"),
+            "The reverb dips while the music plays and blooms in the gaps, keeping busy passages clear",
+        );
+        widgets::inset(ui, |ui| {
+            ui.checkbox(&mut p.fx.freeze, "Freeze the tail").on_hover_text(
+                "Holds the reverb as it is, ringing on forever, while new notes play dry over it. \
+                 Turn on over a chord you like.",
+            );
+        });
+        widgets::subtitle(ui, "Echo", "");
+        widgets::note(ui, "How much of each part goes into the echo is set by the Echo sends on the mixer.", "");
+        widgets::dropdown(ui, "echo_time", "Time", p.fx.echo.time.label(), "The gap between repeats, in beats", |ui| {
+            for t in EchoTime::ALL {
+                ui.selectable_value(&mut p.fx.echo.time, t, t.label());
+            }
+        });
+        amount(ui, "echo_fb", "Repeats", &mut p.fx.echo.feedback, ("one", "many"), "How many times the echo repeats");
+        amount(ui, "echo_tone", "Tone", &mut p.fx.echo.tone, ("dark", "bright"), "Each repeat gets darker, like tape");
+        amount(ui, "echo_wow", "Wow", &mut p.fx.echo.wow, ("steady", "wobbly"), "A slow tape-like wobble on the repeats");
+        amount(
+            ui,
+            "echo_rev",
+            "Into reverb",
+            &mut p.fx.echo.to_reverb,
+            ("dry", "washed"),
+            "How much of the echo goes on into the reverb",
+        );
+        widgets::inset(ui, |ui| {
+            ui.checkbox(&mut p.fx.echo.ping_pong, "Ping-pong").on_hover_text("The repeats bounce between left and right");
+        });
         widgets::subtitle(ui, "Tuning", "");
         amount(
             ui,
@@ -1421,6 +1551,15 @@ impl App {
             "Pulls each part and note slightly off pitch and widens ensemble sounds, for a warmer, chorused sound",
         );
         amount(ui, "drift", "Drift", &mut p.fx.drift, ("steady", "wobbly"), "Slow pitch wander, like an old tape or a worn record");
+        amount(
+            ui,
+            "ensemble",
+            "Ensemble",
+            &mut p.fx.ensemble,
+            ("off", "lush"),
+            "A string-machine chorus over everything but the bass: each sound becomes a slightly out-of-tune ensemble, \
+             like a 1970s polysynth",
+        );
         widgets::dropdown(ui, "tuning", "Pitch", p.fx.tuning.label(), "The reference pitch for A above middle C", |ui| {
             for t in Tuning::ALL {
                 ui.selectable_value(&mut p.fx.tuning, t, t.label());
@@ -1428,7 +1567,7 @@ impl App {
         });
         if p.fx != Fx::default() {
             widgets::inset(ui, |ui| {
-                if widgets::text_button(ui, "Reset reverb & tuning", false, true).clicked() {
+                if widgets::text_button(ui, "Reset effects & tuning", false, true).clicked() {
                     p.fx = Fx::default();
                 }
             });
@@ -1597,6 +1736,12 @@ impl App {
                     }
                 }
             });
+            if widgets::text_button(ui, "Mixer", self.show_mixer, true)
+                .on_hover_text("Show or hide the mixer: levels, pan, sends and which channel each part plays through")
+                .clicked()
+            {
+                self.show_mixer = !self.show_mixer;
+            }
             ui.separator();
             if widgets::text_button(ui, "Save MIDI…", false, true).on_hover_text("Save the piece as a MIDI file").clicked() {
                 self.save_midi();
@@ -1623,6 +1768,18 @@ impl App {
         });
     }
 
+    fn mixer_panel(&mut self, ui: &mut egui::Ui) {
+        let parts: Vec<PartInfo> = self
+            .song
+            .parts
+            .iter()
+            .map(|i| PartInfo { inst: *i, color: inst_color(*i), sound: self.song.sound_name(*i) })
+            .collect();
+        ui.add_space(6.0);
+        self.mixer_view.show(ui, &mut self.params.mix, &parts, &self.meters);
+        ui.add_space(6.0);
+    }
+
     fn toggle_play(&mut self) {
         if let Some(p) = &self.player {
             if p.is_playing() {
@@ -1634,7 +1791,6 @@ impl App {
     }
 
     fn piano_roll(&mut self, ui: &mut egui::Ui) {
-        let song = &self.song;
         let size = ui.available_size();
         let (resp, painter) = ui.allocate_painter(size, Sense::click_and_drag());
         let rect = resp.rect;
@@ -1645,16 +1801,53 @@ impl App {
         let header = 22.0;
         let footer = 18.0;
         let roll = Rect::from_min_max(rect.min + Vec2::new(0.0, header), rect.max - Vec2::new(0.0, footer));
-        let total = song.total_ticks.max(1) as f32;
-        let x_of = |t: u32| roll.left() + roll.width() * t as f32 / total;
+        let total = self.song.total_ticks.max(1) as f64;
+
+        // Zoom with a pinch or ⌘/Ctrl + scroll, around the pointer; scroll to move along.
+        let min_span = (self.song.bar_ticks() as f64 * 2.0 / total).min(1.0);
+        if resp.hovered() {
+            let (zoom, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+            let (v0, v1) = self.roll_view;
+            let span = v1 - v0;
+            if zoom != 1.0 {
+                let at = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .map_or(0.5, |p| ((p.x - roll.left()) / roll.width()).clamp(0.0, 1.0) as f64);
+                let pivot = v0 + at * span;
+                let new = (span / zoom as f64).clamp(min_span, 1.0);
+                self.roll_view = (pivot - at * new, pivot - at * new + new);
+            } else if scroll.x != 0.0 || scroll.y != 0.0 {
+                let d = -(scroll.x + scroll.y) as f64 / roll.width() as f64 * span;
+                self.roll_view = (v0 + d, v1 + d);
+            }
+        }
+        let (mut v0, mut v1) = self.roll_view;
+        let span = (v1 - v0).clamp(min_span, 1.0);
+        v0 = v0.clamp(0.0, 1.0 - span);
+        v1 = v0 + span;
+        self.roll_view = (v0, v1);
+        let zoomed = span < 0.999;
+
+        let song = &self.song;
+        let x_of = |t: u32| roll.left() + roll.width() * ((t as f64 / total - v0) / span) as f32;
+        let tick_at = |x: f32| ((v0 + ((x - roll.left()) / roll.width()) as f64 * span) * total).clamp(0.0, total) as u32;
+        let clipped = painter.with_clip_rect(roll);
+        let head = painter.with_clip_rect(Rect::from_x_y_ranges(roll.x_range(), rect.top()..=roll.bottom()));
 
         let (lo, hi) = song
             .notes
             .iter()
+            .chain(&song.off)
             .fold((127u8, 0u8), |(lo, hi), n| (lo.min(n.key), hi.max(n.key)));
         let (lo, hi) = if lo > hi { (48.0, 84.0) } else { (lo as f32 - 2.0, hi as f32 + 3.0) };
         let row_h = roll.height() / (hi - lo);
         let y_of = |k: u8| roll.bottom() - (k as f32 - lo) * row_h;
+        let note_rect = |n: &Note| {
+            let x0 = x_of(n.start);
+            let x1 = x_of(n.end()).max(x0 + 1.5);
+            let y = y_of(n.key);
+            Rect::from_min_max(Pos2::new(x0, y - row_h * 0.9), Pos2::new(x1, y))
+        };
 
         // C lines
         let grid = if dark { Color32::from_white_alpha(10) } else { Color32::from_black_alpha(14) };
@@ -1672,12 +1865,15 @@ impl App {
         }
         // bar lines
         let bt = song.bar_ticks();
-        let px_per_bar = roll.width() / (total / bt as f32);
+        let px_per_bar = roll.width() * bt as f32 / (total * span) as f32;
         let every = if px_per_bar > 14.0 { 1 } else { ((14.0 / px_per_bar).ceil() as u32).next_power_of_two() };
         for b in (0..=song.bars).step_by(every as usize) {
             let x = x_of(b * bt);
             let strong = b % (every * 4) == 0;
-            painter.vline(x, roll.y_range(), Stroke::new(1.0, if strong { grid.gamma_multiply(2.0) } else { grid }));
+            clipped.vline(x, roll.y_range(), Stroke::new(1.0, if strong { grid.gamma_multiply(2.0) } else { grid }));
+            if zoomed && strong && px_per_bar * every as f32 > 30.0 {
+                clipped.text(Pos2::new(x + 2.0, roll.bottom() - 2.0), Align2::LEFT_BOTTOM, format!("{}", b + 1), tk.font(9.0), grid.gamma_multiply(5.0));
+            }
         }
 
         // chords
@@ -1685,8 +1881,8 @@ impl App {
         let text_col = tk.text_dim;
         for (t, name) in &song.chords {
             let x = x_of(*t);
-            if x - last_x > 46.0 {
-                painter.text(Pos2::new(x + 2.0, rect.top() + 4.0), Align2::LEFT_TOP, name, tk.font(11.0), text_col);
+            if x - last_x > 46.0 && x > roll.left() - 40.0 && x < roll.right() {
+                head.text(Pos2::new(x + 2.0, rect.top() + 4.0), Align2::LEFT_TOP, name, tk.font(11.0), text_col);
                 last_x = x;
             }
         }
@@ -1694,15 +1890,15 @@ impl App {
         // slideshow: shaded intro and outro, a line at each image change
         if self.slideshow.show_on_timeline {
             let plan = self.slide_plan();
-            let x_s = |secs: f64| x_of(song.secs_to_tick(secs)).min(roll.right());
+            let x_s = |secs: f64| x_of(song.secs_to_tick(secs)).min(x_of(song.total_ticks));
             let shade = if dark { Color32::from_white_alpha(8) } else { Color32::from_black_alpha(10) };
             let images_end = plan.intro + plan.images as f64 * plan.slot.secs;
             for (a, b, label) in [(0.0, plan.intro, "intro"), (images_end, plan.total, "outro")] {
                 let r = Rect::from_x_y_ranges(x_s(a)..=x_s(b), roll.y_range());
                 if r.width() > 0.5 {
-                    painter.rect_filled(r, 0.0, shade);
+                    clipped.rect_filled(r, 0.0, shade);
                     if r.width() > 34.0 {
-                        painter.text(r.left_bottom() + Vec2::new(3.0, -3.0), Align2::LEFT_BOTTOM, label, tk.font(10.0), text_col);
+                        clipped.text(r.left_bottom() + Vec2::new(3.0, -3.0), Align2::LEFT_BOTTOM, label, tk.font(10.0), text_col);
                     }
                 }
             }
@@ -1710,25 +1906,61 @@ impl App {
             let mut last_x = f32::NEG_INFINITY;
             for (i, t) in plan.starts().enumerate() {
                 let x = x_s(t);
-                painter.vline(x, roll.y_range(), Stroke::new(1.0, line));
+                clipped.vline(x, roll.y_range(), Stroke::new(1.0, line));
                 if x - last_x > 22.0 {
-                    painter.text(Pos2::new(x + 2.0, roll.top() + 2.0), Align2::LEFT_TOP, format!("{}", i + 1), tk.font(9.0), line);
+                    clipped.text(Pos2::new(x + 2.0, roll.top() + 2.0), Align2::LEFT_TOP, format!("{}", i + 1), tk.font(9.0), line);
                     last_x = x;
                 }
             }
             if plan.images > 0 {
-                painter.vline(x_s(images_end), roll.y_range(), Stroke::new(1.0, line));
+                clipped.vline(x_s(images_end), roll.y_range(), Stroke::new(1.0, line));
             }
         }
 
-        // notes
-        for n in &song.notes {
-            let x0 = x_of(n.start);
-            let x1 = x_of(n.end()).max(x0 + 1.5);
-            let y = y_of(n.key);
+        // notes, then the ones switched off as outlines
+        let visible = |r: &Rect| r.right() >= roll.left() && r.left() <= roll.right();
+        for (n, e) in song.notes.iter().zip(song.exprs.iter().chain(std::iter::repeat(&Expr::default()))) {
+            let r = note_rect(n);
+            if !visible(&r) {
+                continue;
+            }
             let alpha = 0.35 + 0.65 * (n.vel as f32 / 110.0).min(1.0);
             let c = inst_color(n.inst).gamma_multiply(alpha);
-            painter.rect_filled(Rect::from_min_max(Pos2::new(x0, y - row_h * 0.9), Pos2::new(x1, y)), 1.5, c);
+            clipped.rect_filled(r, 1.5, c);
+            if !e.is_plain() && r.width() > 10.0 {
+                paint_expression(&clipped, r, e, if dark { Color32::from_black_alpha(150) } else { Color32::from_black_alpha(120) });
+            }
+        }
+        for n in &song.off {
+            let r = note_rect(n);
+            if visible(&r) {
+                clipped.rect_stroke(r, 1.5, Stroke::new(1.0, inst_color(n.inst).gamma_multiply(0.55)), egui::StrokeKind::Inside);
+            }
+        }
+
+        // the note under the pointer, when notes can be edited
+        let pointer = resp.hover_pos().filter(|p| roll.contains(*p));
+        let hit = |p: Pos2| -> Option<(Note, bool)> {
+            let near = |n: &Note| {
+                let r = note_rect(n);
+                Rect::from_min_max(r.min - Vec2::new(1.0, 1.0), Pos2::new(r.right().max(r.left() + 4.0) + 1.0, r.bottom() + 1.0)).contains(p)
+            };
+            let on = song.notes.iter().rev().find(|n| near(n)).map(|n| (*n, false));
+            on.or_else(|| song.off.iter().rev().find(|n| near(n)).map(|n| (*n, true)))
+        };
+        let hovered = pointer.and_then(hit);
+        if self.edit_notes {
+            if let Some((n, off)) = hovered {
+                clipped.rect_stroke(note_rect(&n).expand(1.5), 2.0, Stroke::new(1.5, tk.pick), egui::StrokeKind::Outside);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                let what = if off { "switch it back on" } else { "switch it off" };
+                resp.clone().on_hover_text_at_pointer(format!(
+                    "{} {} · bar {}\nClick to {what}, drag across notes to do the same to them, right-click to shape it",
+                    n.inst.role(),
+                    note_name(n.key),
+                    bar_beat(song, n.start)
+                ));
+            }
         }
 
         // legend
@@ -1737,41 +1969,221 @@ impl App {
             let muted = song.params.muted.contains(&i);
             let col = if muted { inst_color(i).gamma_multiply(0.25) } else { inst_color(i) };
             painter.rect_filled(Rect::from_min_size(Pos2::new(lx, rect.bottom() - 13.0), Vec2::splat(9.0)), 2.0, col);
-            let label = format!(
-                "{}: {}{}",
-                i.role(),
-                song.sound_name(i),
-                if muted { " (off)" } else { "" }
-            );
+            let label = format!("{}: {}{}", i.role(), song.sound_name(i), if muted { " (off)" } else { "" });
             let tc = if muted { text_col.gamma_multiply(0.5) } else { text_col };
             let g = painter.layout_no_wrap(label, tk.font(11.0), tc);
             let w = g.size().x;
             painter.galley(Pos2::new(lx + 13.0, rect.bottom() - 15.0), g, text_col);
             lx += w + 28.0;
         }
-        let info = format!(
-            "{} · {} bpm · {}/{} · {} bars",
-            song.params.title(),
-            song.bpm,
-            song.meter.0,
-            song.meter.1,
-            song.bars
-        );
+        let info = format!("{} · {} bpm · {}/{} · {} bars", song.params.title(), song.bpm, song.meter.0, song.meter.1, song.bars);
         painter.text(rect.right_bottom() - Vec2::new(6.0, 3.0), Align2::RIGHT_BOTTOM, info, tk.font(11.0), text_col);
 
-        // playhead + seeking
-        if let Some(p) = &self.player {
-            let pos = p.position();
-            let tick = song.secs_to_tick(pos).min(song.total_ticks);
-            let x = x_of(tick);
-            painter.vline(x, roll.y_range(), Stroke::new(2.0, Color32::from_rgb(255, 120, 90)));
-            if let Some(ptr) = resp.interact_pointer_pos() {
-                if resp.clicked() || resp.dragged() {
-                    let f = ((ptr.x - roll.left()) / roll.width()).clamp(0.0, 1.0);
-                    p.send(Cmd::Seek(song.tick_to_secs((f * total) as u32)));
-                }
+        // playhead
+        let playhead = self.player.as_ref().map(|p| song.secs_to_tick(p.position()).min(song.total_ticks));
+        if let Some(tick) = playhead {
+            clipped.vline(x_of(tick), roll.y_range(), Stroke::new(2.0, Color32::from_rgb(255, 120, 90)));
+        }
+
+        // What the pointer did: seek, switch notes, or open a note's menu.
+        let mut seek = None;
+        let mut switch: Vec<(Note, bool)> = Vec::new();
+        let press = resp.interact_pointer_pos();
+        if self.edit_notes && resp.drag_started() {
+            if let Some((n, off)) = press.filter(|p| roll.contains(*p)).and_then(hit) {
+                self.paint = Some((!off, vec![(n.inst, n.start, n.key)]));
+                switch.push((n, !off));
             }
         }
+        if resp.clicked() {
+            match press.filter(|_| self.edit_notes).and_then(hit) {
+                Some((n, off)) => switch.push((n, !off)),
+                None => seek = press.map(|p| tick_at(p.x)),
+            }
+        } else if resp.dragged() {
+            match &mut self.paint {
+                Some((to_off, done)) => {
+                    if let Some((n, off)) = press.and_then(hit) {
+                        let id = (n.inst, n.start, n.key);
+                        if off != *to_off && !done.contains(&id) {
+                            done.push(id);
+                            switch.push((n, *to_off));
+                        }
+                    }
+                }
+                None => seek = press.map(|p| tick_at(p.x)),
+            }
+        }
+        if resp.drag_stopped() {
+            self.paint = None;
+        }
+        if resp.secondary_clicked() {
+            self.note_menu = press.and_then(hit).map(|(n, _)| n);
+        }
+
+        // edit mode, zoom and edits, over the top right of the roll
+        let edits = self.params.piece_edits().count();
+        let bar = Rect::from_min_max(Pos2::new(rect.right() - 330.0, rect.top() + header + 4.0), Pos2::new(rect.right() - 6.0, rect.top() + header + 30.0));
+        let mut ui_bar = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        if widgets::text_button(&mut ui_bar, "Edit notes", self.edit_notes, true)
+            .on_hover_text("Click notes to switch them off and on, or drag across several. Right-click any note to shape it.")
+            .clicked()
+        {
+            self.edit_notes = !self.edit_notes;
+        }
+        if zoomed && widgets::text_button(&mut ui_bar, "Fit", false, true).on_hover_text("Show the whole piece").clicked() {
+            self.roll_view = (0.0, 1.0);
+        }
+        if edits > 0 {
+            if widgets::text_button(&mut ui_bar, "Undo edits", false, true)
+                .on_hover_text("Switch every note back on and remove every shape you gave notes in this piece")
+                .clicked()
+            {
+                let id = self.params.piece_id();
+                self.params.edits.retain(|e| e.piece != id);
+            }
+            let label = if edits == 1 { "1 note edited".to_string() } else { format!("{edits} notes edited") };
+            ui_bar.label(egui::RichText::new(label).font(tk.font(11.0)).color(tk.text_dim));
+        } else if !zoomed && !self.edit_notes {
+            let hint = if cfg!(target_os = "macos") { "pinch or ⌘ scroll to zoom" } else { "Ctrl + scroll to zoom" };
+            ui_bar.label(egui::RichText::new(hint).font(tk.font(10.5)).color(tk.text_disabled));
+        }
+
+        if let Some(n) = self.note_menu {
+            resp.context_menu(|ui| self.note_menu_ui(ui, n));
+        }
+        if let Some(t) = seek {
+            if let Some(p) = &self.player {
+                p.send(Cmd::Seek(self.song.tick_to_secs(t)));
+            }
+        }
+        if !switch.is_empty() {
+            for (n, off) in switch {
+                self.params.edit_mut(&n).off = off;
+            }
+            self.params.tidy_edits();
+            self.regenerate();
+        }
+    }
+
+    /// A note's menu: switch it off or on, and shape it.
+    fn note_menu_ui(&mut self, ui: &mut egui::Ui, n: Note) {
+        let t = Tokens::get(ui.ctx());
+        let same = |m: &Note| m.inst == n.inst && m.start == n.start && m.key == n.key;
+        let idx = self.song.notes.iter().position(same);
+        let (vel, expr) = match idx {
+            Some(i) => (self.song.notes[i].vel, self.song.exprs.get(i).copied().unwrap_or_default()),
+            None => {
+                let edit = self.params.piece_edits().find(|e| e.matches(&n));
+                (edit.and_then(|e| e.vel).unwrap_or(n.vel), edit.and_then(|e| e.expr).unwrap_or_default())
+            }
+        };
+        ui.set_min_width(250.0);
+        ui.label(
+            egui::RichText::new(format!("{} · {} · bar {}", n.inst.role(), note_name(n.key), bar_beat(&self.song, n.start)))
+                .font(t.semibold(12.0))
+                .color(t.text),
+        );
+        ui.add_space(4.0);
+        let mut on = idx.is_some();
+        let mut v = vel as f32;
+        let mut e = expr;
+        let mut changed = ui.checkbox(&mut on, "Play this note").changed();
+        ui.spacing_mut().slider_width = 150.0;
+        let row = |ui: &mut egui::Ui, label: &str, x: &mut f32, range: std::ops::RangeInclusive<f32>, help: &str| {
+            ui.horizontal(|ui| {
+                ui.add_sized([62.0, 18.0], egui::Label::new(egui::RichText::new(label).font(t.font(11.5)).color(t.text_label)));
+                let r = ui.add(egui::Slider::new(x, range).max_decimals(2)).on_hover_text(help);
+                r.changed()
+            })
+            .inner
+        };
+        let vel_changed = row(ui, "Velocity", &mut v, 1.0..=127.0, "How hard the note is played");
+        let mut shaped = row(ui, "Swell", &mut e.swell, -1.0..=1.0, "Below 0 the note fades away; above 0 it swells up and back");
+        shaped |= row(ui, "Vibrato", &mut e.vibrato, 0.0..=1.0, "Vibrato that comes in a little after the note starts");
+        shaped |= row(ui, "Bend", &mut e.bend, -1.0..=1.0, "Above 0 it slides up into the note; below 0 it falls away at the end");
+        changed |= vel_changed || shaped;
+        let chords = self
+            .song
+            .notes
+            .iter()
+            .any(|m| m.inst == n.inst && !same(m) && m.start < n.end() && m.end() > n.start);
+        if chords {
+            widgets::note(ui, "Other notes of this part sound at the same time, so the swell, vibrato and bend shape them too.", "");
+        }
+        if !self.song.sustains(n.inst) && (e.swell != 0.0 || e.vibrato > 0.0) {
+            widgets::note(ui, "This sound dies away by itself, so a swell or vibrato only shapes what is left of it.", "");
+        }
+        ui.add_space(4.0);
+        if changed {
+            let edit = self.params.edit_mut(&n);
+            edit.off = !on;
+            if vel_changed {
+                edit.vel = Some(v.round() as u8);
+            }
+            if shaped {
+                edit.expr = Some(e);
+            }
+            self.params.tidy_edits();
+        }
+        if ui.button("Reset this note").on_hover_text("Back to how it was generated").clicked() {
+            let id = self.params.piece_id();
+            self.params.edits.retain(|x| !(x.piece == id && x.matches(&n)));
+            ui.close();
+        }
+    }
+}
+
+/// A note's name, such as F#4.
+fn note_name(key: u8) -> String {
+    format!("{}{}", NOTE_NAMES[key as usize % 12], key as i32 / 12 - 1)
+}
+
+/// Where a tick falls, as bar.beat counting from 1.
+fn bar_beat(song: &Song, tick: u32) -> String {
+    let bt = song.bar_ticks().max(1);
+    let beat = song.ppq * 4 / song.meter.1;
+    format!("{}.{}", tick / bt + 1, (tick % bt) / beat.max(1) + 1)
+}
+
+/// Marks on a note for its expression: its volume contour, vibrato as a wave,
+/// and a slide into or away from it.
+fn paint_expression(p: &egui::Painter, r: Rect, e: &Expr, col: Color32) {
+    let stroke = Stroke::new(1.0, col);
+    if e.swell != 0.0 {
+        let s = e.swell;
+        let pts: Vec<Pos2> = (0..=16)
+            .map(|i| {
+                let x = i as f32 / 16.0;
+                let v = if s > 0.0 {
+                    1.0 - 0.6 * s + 0.6 * s * (std::f32::consts::PI * x).sin()
+                } else {
+                    1.0 - 0.8 * s.abs() * x.powf(0.8)
+                };
+                Pos2::new(r.left() + r.width() * x, r.bottom() - r.height() * v * 0.9)
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, stroke));
+    }
+    if e.vibrato > 0.0 {
+        let from = r.left() + r.width() * 0.35;
+        let amp = (r.height() * 0.25 * e.vibrato).max(0.6);
+        let y = r.center().y;
+        let n = ((r.right() - from) / 1.5) as usize;
+        let pts: Vec<Pos2> = (0..=n).map(|i| {
+            let x = from + i as f32 * 1.5;
+            Pos2::new(x, y + amp * (x * 0.9).sin())
+        }).collect();
+        if pts.len() > 1 {
+            p.add(egui::Shape::line(pts, stroke));
+        }
+    }
+    if e.bend > 0.0 {
+        let w = (r.width() * 0.3).min(14.0);
+        p.line_segment([Pos2::new(r.left() - w * 0.4, r.bottom() + r.height() * 1.2 * e.bend), Pos2::new(r.left() + w, r.center().y)], stroke);
+    } else if e.bend < 0.0 {
+        let w = (r.width() * 0.3).min(14.0);
+        p.line_segment([Pos2::new(r.right() - w, r.center().y), Pos2::new(r.right() + w * 0.4, r.bottom() + r.height() * 1.2 * -e.bend)], stroke);
     }
 }
 
@@ -1793,6 +2205,7 @@ impl eframe::App for App {
         eframe::set_value(storage, KEY_CHECK_UPDATES, &self.check_updates);
         eframe::set_value(storage, KEY_SLIDESHOW, &self.slideshow);
         eframe::set_value(storage, KEY_VARY_SOUNDS, &self.vary_sounds);
+        eframe::set_value(storage, KEY_SHOW_MIXER, &self.show_mixer);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1846,6 +2259,9 @@ impl eframe::App for App {
             });
         self.show_controls = show_controls;
         egui::Panel::bottom("toolbar").resizable(false).exact_size(40.0).show(ui, |ui| self.toolbar(ui));
+        if self.show_mixer {
+            egui::Panel::bottom("mixer").resizable(false).show(ui, |ui| self.mixer_panel(ui));
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).fill(tokens.canvas))
             .show(ui, |ui| self.piano_roll(ui));
@@ -1854,10 +2270,13 @@ impl eframe::App for App {
         self.sync_slideshow_length();
         // Wait until a slider drag is released so playback isn't constantly restarted.
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
-        if self.auto_regen && !self.params.same_music(&self.generated_from) && !dragging {
+        // note edits always apply, even when other changes wait for Generate
+        let edited = self.params.edits != self.generated_from.edits;
+        if (self.auto_regen || edited) && !self.params.same_music(&self.generated_from) && !dragging {
             self.regenerate();
         }
         self.sync_fx();
+        self.sync_mix();
         self.assign_window(ui.ctx());
         self.poll_update_check();
         #[cfg(target_os = "macos")]
@@ -1879,7 +2298,8 @@ impl eframe::App for App {
         if let Some(s) = &mut self.snapshot {
             s.tick(ui.ctx());
         }
-        let busy = self.player.as_ref().map(|p| p.is_playing()).unwrap_or(false) || self.export.is_some();
+        let busy = self.player.as_ref().map(|p| p.is_playing()).unwrap_or(false) || self.export.is_some()
+            || (self.show_mixer && self.mixer_view.active());
         if busy {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }

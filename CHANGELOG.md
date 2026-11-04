@@ -5,6 +5,25 @@ All notable changes to this project are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-04
+
+### Added
+- Neon Noir, an electronic style in the spirit of Vangelis's *Blade Runner* (21 styles in all): CS-80-style brass swells that sag in pitch at the end of each phrase, a smoky lead with deep vibrato and slides over a low drone, bells falling like rain, and in some pieces a slow heartbeat or a ticking pulse. Its variants change how the brass enters, the pulse, the lead, the rain and the drone. Choosing it also sets its effects and echo sends.
+- CS Brass and Smoky Lead presets in the Ambient Electronic SoundFont (14 in all).
+- The Noir reverb space: a vast, dark 1980s digital hall with a long pre-delay and a slow, chorused tail.
+- Ensemble: a string-machine chorus over every part but the bass.
+- Style variants (generator version 3): the seed chooses among different treatments of each style, such as the accompaniment figure, bass line, voicing, pulse or comping rhythm, drone and the tune's phrasing, so pieces in the same style differ in texture as well as notes. Recipes from earlier versions play exactly as before.
+- A stereo mixer: a channel strip for each part with a fader, level meter, pan, stereo width, reverb and echo sends, mute and solo, and a master fader with a stereo meter. Parts can be moved onto shared channels (up to eight), so one fader moves them together. The mix is saved in recipes and projects, applied to WAV export, and written to MIDI files as volume, pan and reverb send.
+- Note editing in the piano roll: **Edit notes** lets you click notes to switch them off and on, or drag across several. Right-click a note to set its velocity, swell or fade, vibrato, and a slide into or away from it. Edits are kept per piece and saved in recipes, projects and MIDI files, and playback carries on while you edit.
+- Note expression (generator version 3): vibrato on long notes of the tune and bass, swells on the longest notes of the tune, and occasional slides up into a note after a leap, for sustaining sounds. Written to MIDI files as CC1, CC11 and pitch bend. Falls carry on sagging into the note's release, and the notes of a chord share one slide.
+- Piano roll zoom: pinch or ⌘/Ctrl + scroll around the pointer, scroll to move along, and **Fit**. Bar numbers show when zoomed in.
+- Reverb: Plate and Cloud (granular) spaces; pre-delay, low cut, width and ducking controls; Freeze, which holds the tail forever; and shimmer intervals (a fifth up, two octaves up, an octave down) as well as an octave up.
+- A tempo-synced echo with repeats, tone, tape wow, ping-pong and a send into the reverb, fed from the mixer's echo sends.
+
+### Changed
+- "Reverb & Tuning" is now "Effects & Tuning".
+- Each part plays through its own synth engine, and SoundFont parts each get their own reverb send rather than sharing the loudest one.
+
 ## [0.4.0] - 2026-11-03
 
 ### Added
@@ -64,7 +83,8 @@ All notable changes to this project are documented here. The project uses
 
 First release: seven ambient styles, seeded and repeatable generation, a built-in synth, GeneralUser GS SoundFont playback, MIDI and WAV export, and per-part switches and sounds.
 
-[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.1.0...v0.2.0
