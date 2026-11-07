@@ -319,7 +319,7 @@ impl App {
             app.status = format!("Loaded {} SoundFonts", app.fonts.len());
         }
         let snap_style = app.snapshot.as_ref().and_then(|s| {
-            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir), ("trailer", Style::TechTrailer)]
+            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir), ("trailer", Style::TechTrailer), ("rain", Style::MegacityRain)]
                 .into_iter()
                 .find(|(o, _)| s.wants(o))
                 .map(|(_, st)| st)
@@ -1185,10 +1185,10 @@ impl App {
             id: "slide_hold",
             label: "Time per image",
             help: "How long you'd like each image on screen, fades included. It is matched to whole bars \
-                   (or beats), between 4 and 8 seconds.",
+                   (or beats), between 4 and 16 seconds.",
             min: slideshow::MIN_HOLD,
             max: slideshow::MAX_HOLD,
-            default: 6.0,
+            default: 12.0,
             step: 0.5,
             decimals: 1,
             suffix: " s",
@@ -1202,10 +1202,11 @@ impl App {
         let spec = widgets::SliderSpec {
             id: "slide_fade",
             label: "Crossfade",
-            help: "How long one image takes to fade into the next. It overlaps the time on screen.",
+            help: "How long one image takes to fade into the next. It overlaps the time on screen, and is at most \
+                   half of it.",
             min: 0.0,
-            max: 2.0,
-            default: 1.0,
+            max: slideshow::MAX_FADE,
+            default: 6.0,
             step: 0.1,
             decimals: 1,
             suffix: " s",

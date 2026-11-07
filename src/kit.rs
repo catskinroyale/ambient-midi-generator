@@ -12,12 +12,16 @@ use std::sync::Arc;
 /// another kit plays something like them.
 pub mod drum {
     /// A soft, muffled kick, played in pairs like a heartbeat.
+    /// A deep, dull kick with no click, heavy rather than punchy.
+    pub const DEEP_KICK: u8 = 34;
     pub const HEARTBEAT: u8 = 35;
     pub const KICK: u8 = 36;
     /// A short filtered tick.
     pub const TICK: u8 = 37;
     pub const SNARE: u8 = 38;
     pub const CLAP: u8 = 39;
+    /// A snare with a short burst of dense room, cut off: the 1980s gated sound.
+    pub const GATED_SNARE: u8 = 40;
     pub const TOM_LOW: u8 = 41;
     pub const HAT: u8 = 42;
     pub const TOM_MID: u8 = 43;
@@ -38,8 +42,19 @@ pub mod fx {
     pub const REVERSE_LONG: u8 = 63;
     pub const WHOOSH: u8 = 64;
     pub const DOWNLIFTER: u8 = 65;
+    pub const RAIN: u8 = 66;
     pub const IMPACT: u8 = 67;
+    /// Distant thunder.
+    pub const THUNDER: u8 = 68;
+    /// Machinery and mains hum, far off.
+    pub const HUM: u8 = 69;
+    /// The buzz and flicker of a neon sign.
+    pub const NEON: u8 = 70;
+    /// Distant metal: a slow, bowed clang.
+    pub const METAL: u8 = 71;
     pub const GRAINS: u8 = 72;
+    /// A slowly evolving analogue drone, two octaves below the key.
+    pub const ANALOG_DRONE: u8 = 84;
 }
 
 /// The drum kit's General MIDI program: the Orchestra kit's place, so a General
@@ -70,6 +85,9 @@ pub struct Sound {
     /// Loop start and end for a sustained sound. The samples just past the
     /// end repeat the loop's start, for interpolation.
     pub looped: Option<(usize, usize)>,
+    /// For a sustained sound: how long it takes to swell in, and to die away
+    /// once let go, in seconds.
+    pub fades: (f64, f64),
 }
 
 impl Sound {
@@ -81,11 +99,13 @@ impl Sound {
 /// The drum part's sounds.
 pub fn drums(sr: f64) -> Vec<Sound> {
     vec![
+        one(drum::DEEP_KICK, "Dull Kick", 0.95, deep_kick(sr)),
         one(drum::HEARTBEAT, "Heartbeat", 0.85, heartbeat(sr)),
         one(drum::KICK, "Trailer Kick", 1.0, kick(sr)),
         one(drum::TICK, "Tick", 0.3, tick(sr)),
         one(drum::SNARE, "Big Snare", 0.75, snare(sr)),
         one(drum::CLAP, "Clap", 0.55, clap(sr)),
+        one(drum::GATED_SNARE, "Gated Snare", 0.6, gated_snare(sr)),
         one(drum::TOM_LOW, "Taiko Low", 1.0, tom(sr, 58.0, 0.5, 11)),
         one(drum::HAT, "Filtered Hat", 0.22, hat(sr)),
         one(drum::TOM_MID, "Taiko Mid", 0.9, tom(sr, 78.0, 0.42, 12)),
@@ -113,8 +133,14 @@ pub fn effects(sr: f64) -> Vec<Sound> {
         one(fx::REVERSE_LONG, "Long Reverse Cymbal", 0.45, reverse(REVERSE_LONG_SECS, 24)),
         one(fx::WHOOSH, "Whoosh", 0.4, whoosh(sr)),
         one(fx::DOWNLIFTER, "Downlifter", 0.4, downlifter(sr)),
+        looping(fx::RAIN, "Rain", 0.3, rain(sr), (5.0, 6.0)),
         one(fx::IMPACT, "Impact", 1.0, impact(sr)),
+        one(fx::THUNDER, "Thunder", 0.8, thunder(sr)),
+        looping(fx::HUM, "Hum", 0.35, hum(sr), (4.0, 5.0)),
+        looping(fx::NEON, "Neon Buzz", 0.18, neon(sr), (0.3, 1.5)),
+        one(fx::METAL, "Distant Metal", 0.4, metal(sr)),
         pitched(fx::GRAINS, "Glass Grains", 0.32, grains(sr)),
+        pitched(fx::ANALOG_DRONE, "Analog Drone", 0.55, analog_drone(sr)),
     ]
 }
 
@@ -131,14 +157,19 @@ fn finish(data: Vec<f64>, gain: f64) -> Arc<[f32]> {
 }
 
 fn one(key: u8, name: &'static str, gain: f64, data: Vec<f64>) -> Sound {
-    Sound { name, keys: (key, key), root: key, data: finish(data, gain), looped: None }
+    Sound { name, keys: (key, key), root: key, data: finish(data, gain), looped: None, fades: (0.6, 2.5) }
+}
+
+/// An unpitched sustained sound on one key, looping until it is let go.
+fn looping(key: u8, name: &'static str, gain: f64, (data, looped): (Vec<f64>, (usize, usize)), fades: (f64, f64)) -> Sound {
+    Sound { looped: Some(looped), fades, ..one(key, name, gain, data) }
 }
 
 /// A sound for the octave of keys from `base`, which plays the sample as made
 /// on `base + MADE_AT`. Sounds that play an octave below their keys are made
 /// an octave down.
 fn pitched(base: u8, name: &'static str, gain: f64, data: Vec<f64>) -> Sound {
-    Sound { name, keys: (base, base + 11), root: base + MADE_AT, data: finish(data, gain), looped: None }
+    Sound { name, keys: (base, base + 11), root: base + MADE_AT, data: finish(data, gain), looped: None, fades: (0.6, 2.5) }
 }
 
 /// The frequency of the made-at note in the octave of keys from `base`.
@@ -280,6 +311,23 @@ fn heartbeat(sr: f64) -> Vec<f64> {
     out
 }
 
+/// A deep, heavy kick, muffled: a slow sine drop into a long, low body.
+fn deep_kick(sr: f64) -> Vec<f64> {
+    let mut osc = Osc::default();
+    let mut lp = Svf::default();
+    let mut noise = Noise::new(8);
+    let mut out: Vec<f64> = (0..len(sr, 1.6))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let body = osc.next(34.0 + 24.0 * (-t / 0.05).exp(), sr) * (-t / 0.38).exp() * (1.0 - (-t / 0.004).exp());
+            let thump = lp.run(noise.next(), 180.0, 0.7, sr).low * (-t / 0.02).exp();
+            drive(body + 0.5 * thump, 1.6)
+        })
+        .collect();
+    fade(&mut out, sr, 0.001, 0.2);
+    out
+}
+
 /// A big, round kick: a falling sine with a long sub tail and a beater click.
 fn kick(sr: f64) -> Vec<f64> {
     let mut osc = Osc::default();
@@ -415,7 +463,161 @@ fn cymbal(sr: f64, secs: f64, decay: f64, seed: u64) -> Vec<f64> {
     out
 }
 
+/// A snare whose room is a dense burst of noise, cut off short.
+fn gated_snare(sr: f64) -> Vec<f64> {
+    let mut osc = Osc::default();
+    let (mut bp, mut room, mut dark) = (Svf::default(), Svf::default(), Svf::default());
+    let mut noise = Noise::new(7);
+    let gate = 0.26;
+    let mut out: Vec<f64> = (0..len(sr, 0.45))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let n = noise.next();
+            let body = osc.next(170.0 + 60.0 * (-t / 0.02).exp(), sr) * (-t / 0.06).exp();
+            let wires = bp.run(n, 1900.0, 0.9, sr).band * (-t / 0.08).exp();
+            let shut = if t < gate { 1.0 } else { (-(t - gate) / 0.012).exp() };
+            let tail = room.run(n, 2500.0, 0.7, sr).low * 0.5 * (1.0 - (-t / 0.015).exp()) * (1.0 - 0.4 * t / gate) * shut;
+            // far off, so the top is dulled
+            dark.run(drive(0.8 * body + wires + tail, 1.4), 3200.0, 0.7, sr).low
+        })
+        .collect();
+    fade(&mut out, sr, 0.0005, 0.02);
+    out
+}
+
 // ------------------------------------------------------------------ effects
+
+/// A seamless loop of `secs` from a sound that never repeats: the last
+/// `cross` seconds of it are faded into its start.
+fn crossfaded(sr: f64, secs: f64, cross: f64, mut make: impl FnMut(f64) -> f64) -> (Vec<f64>, (usize, usize)) {
+    let (n, x) = (len(sr, secs), len(sr, cross));
+    let raw: Vec<f64> = (0..n + x).map(|i| make(i as f64 / sr)).collect();
+    let mut out: Vec<f64> = raw[..n].to_vec();
+    for (i, v) in out.iter_mut().take(x).enumerate() {
+        // equal power, for uncorrelated noise
+        let w = (i as f64 / x as f64 * PI / 2.0).sin();
+        *v = *v * w + raw[n + i] * (1.0 - w * w).sqrt();
+    }
+    let guard: Vec<f64> = out[..8].to_vec();
+    out.extend(guard);
+    (out, (0, n))
+}
+
+/// Rain on a city: a hiss of drops, single drops pattering close by, and the
+/// low roar of it on roofs.
+fn rain(sr: f64) -> (Vec<f64>, (usize, usize)) {
+    let mut noise = Noise::new(41);
+    let (mut hiss_hp, mut hiss_lp, mut roar, mut drop_bp) = (Svf::default(), Svf::default(), Svf::default(), Svf::default());
+    let mut drop = (0.0f64, 3000.0f64);
+    crossfaded(sr, 6.0, 1.0, |_| {
+        let n = noise.next();
+        let hiss = hiss_lp.run(hiss_hp.run(n, 500.0, 0.7, sr).high, 7000.0, 0.7, sr).low;
+        let low = roar.run(n, 250.0, 0.7, sr).low;
+        // a new drop now and then, each a tiny ping of filtered noise
+        if noise.unit() < 400.0 / sr {
+            drop = (0.4 + 0.6 * noise.unit(), 1500.0 + 6000.0 * noise.unit());
+        }
+        drop.0 *= 1.0 - 1.0 / (0.004 * sr);
+        let ping = drop_bp.run(n, drop.1, 6.0, sr).band * drop.0;
+        0.35 * hiss + 0.9 * low + 1.2 * ping
+    })
+}
+
+/// Far-off thunder: a soft crack, then rolling rumbles dying away.
+fn thunder(sr: f64) -> Vec<f64> {
+    let mut noise = Noise::new(42);
+    let (mut crack, mut rumble, mut body) = (Svf::default(), Svf::default(), Svf::default());
+    let rolls: Vec<(f64, f64)> = (0..5).map(|k| (0.3 + k as f64 * 0.9 + 0.6 * noise.unit(), 0.4 + 0.6 * noise.unit())).collect();
+    let mut out: Vec<f64> = (0..len(sr, 9.0))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let n = noise.next();
+            let roll: f64 = rolls.iter().map(|(at, a)| if t < *at { 0.0 } else { a * (-(t - at) / 1.2).exp() * (1.0 - (-(t - at) / 0.15).exp()) }).sum();
+            let low = rumble.run(n, 90.0 + 60.0 * (-t / 2.0).exp(), 0.8, sr).low;
+            let mid = body.run(n, 400.0, 0.7, sr).low * (-t / 0.8).exp();
+            let snap = crack.run(n, 1800.0, 0.7, sr).low * (-((t - 0.25).max(0.0)) / 0.08).exp() * if t > 0.25 { 1.0 } else { 0.0 };
+            2.5 * low * roll + 0.6 * mid * roll + 0.25 * snap
+        })
+        .collect();
+    fade(&mut out, sr, 0.02, 1.0);
+    out
+}
+
+/// Machinery in the distance: mains hum and its harmonics over a low rumble
+/// of air.
+fn hum(sr: f64) -> (Vec<f64>, (usize, usize)) {
+    let mut noise = Noise::new(43);
+    let mut air = Svf::default();
+    // a whole number of cycles of 50 Hz in the loop, so the hum loops cleanly
+    let secs = 4.0;
+    crossfaded(sr, secs, 1.0, |t| {
+        let ph = TAU * 50.0 * (t % secs);
+        let mains: f64 = (1..=10).map(|k| if k % 2 == 1 { 1.0 } else { 0.4 } / k as f64 * (k as f64 * ph).sin()).sum();
+        let wobble = 1.0 + 0.15 * (TAU * 0.25 * t).sin();
+        0.25 * mains * wobble + air.run(noise.next(), 180.0, 1.5, sr).band * 2.0
+    })
+}
+
+/// A neon sign: a bright 120 Hz buzz that flickers now and then.
+fn neon(sr: f64) -> (Vec<f64>, (usize, usize)) {
+    let secs = 4.0;
+    let mut noise = Noise::new(44);
+    let dips: Vec<(f64, f64)> = (0..3).map(|_| (0.5 + 3.0 * noise.unit(), 0.3 + 0.6 * noise.unit())).collect();
+    let mut bp = Svf::default();
+    crossfaded(sr, secs, 0.4, |t| {
+        let ph = TAU * 120.0 * t;
+        let buzz: f64 = (1..=40).map(|k| (k as f64 * ph).sin() / k as f64).sum();
+        let flicker: f64 = dips.iter().map(|(at, d)| d * (-((t - at) / 0.03).powi(2)).exp()).sum();
+        bp.run(buzz, 2800.0, 0.8, sr).band * (1.0 - flicker.min(0.95))
+    })
+}
+
+/// Distant metal: a slow, bowed swell of inharmonic partials, muffled by distance.
+fn metal(sr: f64) -> Vec<f64> {
+    let partials = [(1.0, 1.0), (2.76, 0.5), (5.4, 0.25), (8.93, 0.12), (1.49, 0.4)];
+    let mut oscs: Vec<Osc> = partials.iter().map(|_| Osc::default()).collect();
+    let mut noise = Noise::new(45);
+    let (mut scrape, mut lp) = (Svf::default(), Svf::default());
+    let mut out: Vec<f64> = (0..len(sr, 8.0))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let swell = (1.0 - (-t / 1.2).exp()) * (-t / 2.8).exp();
+            let ring: f64 = oscs.iter_mut().zip(&partials).map(|(o, (r, a))| o.next(180.0 * r * (1.0 + 0.002 * (t * 0.7).sin()), sr) * a).sum();
+            let grit = scrape.run(noise.next(), 1400.0, 3.0, sr).band * (0.5 + 0.5 * (TAU * 0.6 * t).sin());
+            lp.run((ring + 0.8 * grit) * swell, 1800.0, 0.7, sr).low
+        })
+        .collect();
+    fade(&mut out, sr, 0.01, 1.0);
+    out
+}
+
+/// A slowly evolving analogue drone: detuned saws and one an octave down,
+/// through a filter that opens and closes over sixteen seconds, swelling in
+/// and dying away so overlapping notes blend.
+fn analog_drone(sr: f64) -> Vec<f64> {
+    let f0 = made_hz(fx::BOOM);
+    let voices: [(f64, f64); 5] = [(-8.0, 1.0), (0.0, 0.8), (7.0, 1.0), (-1203.0, 0.9), (1198.0, 0.25)];
+    let mut saws: Vec<Saw> = (0..voices.len()).map(|k| Saw { phase: k as f64 / 5.0 }).collect();
+    let (mut f1, mut f2) = (Svf::default(), Svf::default());
+    let secs = 16.0;
+    let mut out: Vec<f64> = (0..len(sr, secs))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let mut x = 0.0;
+            for (k, (saw, (cents, amp))) in saws.iter_mut().zip(&voices).enumerate() {
+                let drift = 1.0 + 0.0015 * (TAU * (0.07 + 0.03 * k as f64) * t + k as f64).sin();
+                x += amp * saw.next(f0 * 2f64.powf(cents / 1200.0) * drift, sr);
+            }
+            let sweep = 0.5 - 0.5 * (TAU * t / secs).cos();
+            let fc = 220.0 + 900.0 * sweep + 120.0 * (TAU * 0.21 * t).sin();
+            let y = f2.run(f1.run(x / 3.0, fc, 1.3, sr).low, fc * 1.5, 0.7, sr).low;
+            let env = (t / 4.0).min(1.0) * ((secs - t) / 5.0).min(1.0);
+            drive(y * env, 1.5)
+        })
+        .collect();
+    fade(&mut out, sr, 0.0, 0.05);
+    out
+}
 
 /// A deep sine with a little warmth above it, looped. It is a whole number of
 /// cycles long, so the loop is seamless; the rounding moves the pitch by a

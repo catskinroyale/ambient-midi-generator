@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 /// The shortest and longest time an image may be on screen, fades included.
 pub const MIN_HOLD: f64 = 4.0;
-pub const MAX_HOLD: f64 = 8.0;
+pub const MAX_HOLD: f64 = 16.0;
+/// The longest crossfade: half the longest time on screen.
+pub const MAX_FADE: f64 = MAX_HOLD / 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fit {
@@ -42,8 +44,8 @@ impl Default for Slideshow {
         Slideshow {
             fit: Fit::ImagesToTrack,
             images: 30,
-            hold: 6.0,
-            fade: 1.0,
+            hold: 12.0,
+            fade: 6.0,
             intro_bars: 2,
             outro_bars: 2,
             show_on_timeline: true,
@@ -221,11 +223,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slots_fall_between_four_and_eight_seconds() {
+    fn slots_fall_between_the_shortest_and_longest() {
         for bpm in [30.0, 40.0, 48.0, 60.0, 72.0, 84.0, 120.0, 200.0] {
             for meter in [(4, 4), (3, 4), (6, 8), (6, 4)] {
                 let grid = Grid::new(bpm, meter);
-                for hold in [4.0, 6.0, 8.0] {
+                for hold in [4.0, 6.0, 8.0, 12.0, 16.0] {
                     let s = Slot::choose(&grid, hold);
                     assert!((MIN_HOLD - 1e-6..=MAX_HOLD + 1e-6).contains(&s.secs), "{bpm} {meter:?} {s:?}");
                 }
@@ -245,12 +247,18 @@ mod tests {
         assert_eq!(Slot::choose(&Grid::new(120.0, (4, 4)), 6.0).count, 3);
         // 3/4 at 66 has no half bars: a bar is 2.7 s, two are 5.5 s
         assert_eq!(Slot::choose(&Grid::new(66.0, (3, 4)), 6.0).unit, Unit::Bar);
-        // 6/4 at 40: a bar is 9 s, too long; a half bar is 4.5 s
+        // 6/4 at 40: a bar is 9 s, which fits, so whole bars win over 4.5 s half bars
         let s = Slot::choose(&Grid::new(40.0, (6, 4)), 6.0);
+        assert_eq!((s.count, s.unit), (1, Unit::Bar));
+        // 6/4 at 20 (below the tempo range): a bar is 18 s, too long; a half bar is 9 s
+        let s = Slot::choose(&Grid::new(20.0, (6, 4)), 6.0);
         assert_eq!((s.count, s.unit), (1, Unit::HalfBar));
-        // 5/4 at 30: a bar is 10 s and has no half bar, so it changes on beats
-        let s = Slot::choose(&Grid::new(30.0, (5, 4)), 6.0);
-        assert_eq!((s.count, s.unit), (3, Unit::Beat));
+        // 5/4 at 15: a bar is 20 s and has no half bar, so it changes on beats
+        // of 4 s; 6 s is as near one as two, so two
+        let s = Slot::choose(&Grid::new(15.0, (5, 4)), 6.0);
+        assert_eq!((s.count, s.unit), (2, Unit::Beat));
+        // the default 12 s at 80 bpm in 4/4 (3 s bars) is four bars
+        assert_eq!(Slot::choose(&Grid::new(80.0, (4, 4)), 12.0).count, 4);
     }
 
     #[test]
@@ -280,7 +288,7 @@ mod tests {
         assert!(p.outro >= 2.0 * grid.bar() - 1e-6 && p.outro < 2.0 * grid.bar() + p.slot.secs);
         let csv = p.cue_csv(1.0);
         assert_eq!(csv.lines().count(), p.images as usize + 1);
-        assert_eq!(csv.lines().nth(1).unwrap(), "1,0:08.00,0:16.00,8.00,9.00,3.1,1.00");
+        assert_eq!(csv.lines().nth(1).unwrap(), "1,0:08.00,0:20.00,12.00,13.00,3.1,1.00");
         assert_eq!(p.audio(), 180.0 + REVERB_TAIL);
     }
 
@@ -301,15 +309,18 @@ mod music {
     /// In the styles with a regular pulse, every image change lands on a note.
     /// (Generative Loops phases freely, Tidal Drone and Aurora hold chords for
     /// four slow bars, and Koto Garden's phrases and Neon Noir's brass chords
-    /// breathe across two.)
+    /// breathe across two. Megacity Rain plays loosely, almost out of time,
+    /// with long silences.)
     #[test]
     fn image_changes_land_on_the_music() {
-        let free = [Style::GenerativeLoops, Style::TidalDrone, Style::Aurora, Style::KotoGarden, Style::NeonNoir];
+        let free = [Style::GenerativeLoops, Style::TidalDrone, Style::Aurora, Style::KotoGarden, Style::NeonNoir, Style::MegacityRain];
         for style in Style::ALL.into_iter().filter(|s| !free.contains(s)) {
             for seed in [1, 2] {
                 let p = Params { style, seed, tempo: style.default_tempo(), target_seconds: 120.0, ..Params::default() };
                 let song = generate(&p);
-                let plan = Plan::for_track(&Slideshow::default(), Grid::new(song.bpm, song.meter), song.duration_secs());
+                // images of about 6 s, which most often fall between chords
+                let show = Slideshow { hold: 6.0, fade: 1.0, ..Slideshow::default() };
+                let plan = Plan::for_track(&show, Grid::new(song.bpm, song.meter), song.duration_secs());
                 let onsets: Vec<f64> = song.notes.iter().map(|n| song.tick_to_secs(n.start)).collect();
                 let missed: Vec<f64> =
                     plan.starts().filter(|t| !onsets.iter().any(|o| (o - t).abs() <= 0.05)).collect();

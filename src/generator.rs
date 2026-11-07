@@ -136,6 +136,7 @@ pub fn generate(p: &Params) -> Song {
         Style::Fingerstyle => ctx.fingerstyle(),
         Style::NeonNoir => ctx.neon_noir(),
         Style::TechTrailer => ctx.tech_trailer(),
+        Style::MegacityRain => ctx.megacity_rain(),
     }
     ctx.arrange(secs_per_bar);
 
@@ -3357,6 +3358,252 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Megacity Rain: a dystopian neo-noir synth score. Rain, distant thunder,
+    /// machinery and an evolving analogue drone; a lone, mournful lead; then
+    /// CS-80 brass rolling in slow waves, sub-bass pulses, dark stabs, soft
+    /// distant drums and a smoky sax-like line answering the lead, building
+    /// hypnotically, never to a climax, and sinking back into the rain.
+    fn megacity_rain(&mut self) {
+        let beat = self.ppq;
+        let bar = self.bar;
+        let n = self.bars;
+        let ticks = |secs: f64| (secs * self.p.tempo.clamp(30.0, 200.0) as f64 / 60.0 * beat as f64) as u32;
+        let at = |x: f64| ((n as f64 * x) as u32).min(n - 1);
+        let lead_in = at(0.08).max(1).min(n - 1);
+        let body = (at(0.22) / 2 * 2).max(lead_in);
+        let recede = at(0.82).max(body);
+        let drums_from = at(0.38).max(body);
+        let sax_from = at(0.45).max(body);
+
+        self.intensity = (0..n)
+            .map(|b| {
+                let x = |a: u32, z: u32| (b.max(a) - a) as f64 / (z - a).max(1) as f64;
+                if b < body {
+                    0.15 + 0.1 * x(0, body)
+                } else if b < recede {
+                    0.35 + 0.5 * x(body, recede)
+                } else {
+                    0.4 - 0.25 * x(recede, n)
+                }
+            })
+            .collect();
+
+        // Minor and modal harmony, suspended and unresolved, two bars a chord:
+        // one progression for the opening and close, another for the body.
+        let mut rng = self.rng("rain-harmony");
+        let pool: &[&[i32]] = if self.p.mode.is_minor() {
+            &[&[0, 5, 0, 5], &[0, 6, 5, 6], &[0, 3, 0, 6], &[0, 5, 3, 6], &[0, 2, 5, 6]]
+        } else {
+            &[&[5, 3, 5, 3], &[0, 3, 0, 4], &[5, 4, 3, 4], &[0, 5, 3, 5]]
+        };
+        let exts = [Ext::Triad, Ext::Add9, Ext::Sus2, Ext::Sus4];
+        let prog = |rng: &mut Rng| -> Vec<Chord> {
+            let degs = *rng.pick(pool);
+            degs.iter().map(|d| Chord::new(self.fix_dim(*d), exts[rng.weighted(&[0.15, 0.25, 0.3, 0.3])])).collect()
+        };
+        let outer = prog(&mut rng);
+        let inner = prog(&mut rng);
+        self.harmony = (0..n)
+            .map(|b| {
+                if b + 2 >= n {
+                    // it ends hanging, on a suspended tonic
+                    Chord::new(0, Ext::Sus2)
+                } else if (body..recede).contains(&b) {
+                    inner[((b - body) / 2 % 4) as usize].clone()
+                } else {
+                    outer[(b / 2 % 4) as usize].clone()
+                }
+            })
+            .collect();
+        self.section = (0..n).map(|b| [body, recede].iter().filter(|s| b >= **s).count() as u8).collect();
+
+        let pulse = self.variant("pulse", 2);
+        let stabs = self.variant("stabs", 2);
+        let kick_kind = self.variant("kick", 2);
+        let pc = |key: i32| key.rem_euclid(12);
+        let tonic_pc = pc(self.scale.midi(0));
+        let end = n * bar + bar;
+
+        // ---- the city: rain throughout, machinery far off, an evolving
+        // analogue drone, a sub drone, thunder, distant metal and neon
+        self.note(Inst::Fx, 0, end, fx::RAIN as i32, 74.0);
+        self.note(Inst::Fx, 0, recede * bar, fx::HUM as i32, 58.0);
+        self.note(Inst::Fx, 0, body * bar + beat, fx::DRONE as i32 + tonic_pc, 58.0);
+        self.note(Inst::Fx, recede * bar, end - recede * bar, fx::DRONE as i32 + tonic_pc, 54.0);
+        for b in (0..n).step_by(3) {
+            self.note(Inst::Fx, b * bar, ticks(16.0), fx::ANALOG_DRONE as i32 + tonic_pc, 62.0 + 22.0 * self.it(b));
+        }
+        let mut frng = self.rng("rain-city");
+        let mut b = 1;
+        while b < n {
+            self.note(Inst::Fx, b * bar + frng.range(0, 3) as u32 * beat, ticks(9.0), fx::THUNDER as i32, frng.range_f(55.0, 85.0));
+            b += frng.range(10, 18) as u32;
+        }
+        let mut b = frng.range(2, 5) as u32;
+        while b < recede {
+            self.note(Inst::Fx, b * bar + frng.range(0, 3) as u32 * beat, ticks(8.0), fx::METAL as i32, frng.range_f(42.0, 60.0));
+            b += frng.range(5, 9) as u32;
+        }
+        for b in (body..recede).step_by(12) {
+            self.note(Inst::Fx, b * bar, 8.min(recede - b) * bar, fx::NEON as i32, 52.0);
+        }
+
+        // ---- CS-80 brass rolling in slow waves through the body; every
+        // fourth chord breathes, and sags as it dies away
+        let mut prev = Vec::new();
+        for b in (body..recede).step_by(2) {
+            let chord = self.harmony[b as usize].clone();
+            let it = self.it(b);
+            let start = b * bar;
+            let span = 2.min(recede - b) * bar;
+            let breath = (b - body) / 2 % 4 == 3;
+            let len = if breath { span - beat - beat / 2 } else { span + beat / 4 };
+            let voicing = self.thin(voice_lead(&chord.pitch_classes(&self.scale), &prev, 48, 72, false));
+            prev = voicing.clone();
+            for k in &voicing {
+                self.note(Inst::StringPad, start, len, *k, 44.0 + 30.0 * it);
+            }
+            if it > 0.65 {
+                if let Some(top) = voicing.last() {
+                    self.note(Inst::StringPad, start, len, top + 12, 36.0 + 20.0 * it);
+                }
+            }
+            let to = if breath { 30.0 } else { 40.0 + 25.0 * it };
+            self.swell(Inst::StringPad, start, span, 25.0 + 30.0 * it, 80.0 + 40.0 * it, to);
+        }
+        if recede < n {
+            // the last wave, dying away into the rain
+            let chord = self.harmony[recede as usize].clone();
+            let voicing = voice_lead(&chord.pitch_classes(&self.scale), &prev, 48, 72, false);
+            let span = (n - recede).min(8) * bar;
+            for k in &voicing {
+                self.note(Inst::StringPad, recede * bar, span, *k, 50.0);
+            }
+            self.swell(Inst::StringPad, recede * bar, span, 70.0, 60.0, 0.0);
+        }
+
+        // ---- sub-bass pulses and dark, low stabs
+        for b in body..recede {
+            let chord = self.harmony[b as usize].clone();
+            let it = self.it(b);
+            let bs = b * bar;
+            let root = self.bass_key(&chord, 31);
+            if pulse == 0 {
+                for at in [0, 2] {
+                    self.note(Inst::Cello, bs + at * beat, beat * 3 / 2, root, 52.0 + 28.0 * it);
+                }
+            } else {
+                for i in 0..8u32 {
+                    let wave = 0.75 + 0.25 * (i as f64 * std::f64::consts::TAU / 8.0).cos();
+                    self.note(Inst::Cello, bs + i * beat / 2, beat * 2 / 5, root, (48.0 + 30.0 * it) * wave);
+                }
+            }
+        }
+
+        // ---- dark, low stabs: now and then, off the beat, often answered a
+        // bar later by a softer one
+        let mut srng = self.rng("rain-stabs");
+        let mut b = body + 2;
+        while b + 1 < recede {
+            let it = self.it(b);
+            if srng.chance(0.45 + 0.35 * it) {
+                let chord = self.harmony[b as usize].clone();
+                let voicing = voice_lead(&chord.pitch_classes(&self.scale), &[], 40, 58, false);
+                let at = if stabs == 0 { *srng.pick(&[0, 3, 5]) } else { *srng.pick(&[3, 5, 7]) } * beat / 2;
+                let start = b * bar + at;
+                let vel = 70.0 + 22.0 * it;
+                for k in voicing.iter().take(3) {
+                    self.note(Inst::Pizzicato, start, beat, *k, vel);
+                }
+                if srng.chance(0.5) {
+                    for k in voicing.iter().take(2) {
+                        self.note(Inst::Pizzicato, start + bar, beat, *k, vel * 0.7);
+                    }
+                }
+            }
+            b += 2;
+        }
+
+        // ---- soft, distant drums in two-bar phrases that fill out slowly: a
+        // dull, heavy kick, a gated snare far off, and later a hi-hat ticking
+        // like a clock now and then
+        let mut drng = self.rng("rain-drums");
+        let last = recede.saturating_sub(1);
+        let snare_from = drums_from + 4;
+        let ticks_from = drums_from + last.saturating_sub(drums_from) / 3;
+        for b in drums_from..last {
+            let it = self.it(b);
+            let bs = b * bar;
+            let e = beat / 2;
+            let kick = 72.0 + 14.0 * it;
+            if (b - drums_from) % 2 == 0 {
+                self.note(Inst::Drums, bs, e, drum::DEEP_KICK as i32, kick);
+                continue;
+            }
+            // the answering bar: the kick lands late, then the snare
+            let late: &[u32] = if kick_kind == 0 { &[3] } else { &[0, 5] };
+            for at in late {
+                self.note(Inst::Drums, bs + at * e, e, drum::DEEP_KICK as i32, kick - 10.0);
+            }
+            if b >= snare_from {
+                self.note(Inst::Drums, bs + 2 * beat, e, drum::GATED_SNARE as i32, 56.0 + 16.0 * it);
+            }
+            if b >= ticks_from && drng.chance(0.4 + 0.3 * it) {
+                for (i, at) in [1, 3, 5, 7].iter().enumerate() {
+                    self.note(Inst::Drums, bs + at * e, e, drum::HAT as i32, 34.0 - 3.0 * i as f64);
+                }
+            }
+        }
+
+        // ---- distant glassy notes, now and then
+        let mut krng = self.rng("rain-glass");
+        for b in body..recede {
+            if krng.chance(0.15 + 0.1 * self.it(b)) {
+                let deg = loop {
+                    let d = krng.range(14, 19);
+                    if self.scale.is_pentatonic(d) {
+                        break d;
+                    }
+                };
+                let on = krng.range(0, 7) as u32 * beat / 2;
+                self.note(Inst::Piano, b * bar + on, 3 * beat, self.scale.midi(deg), 44.0 + 14.0 * self.it(b));
+            }
+        }
+
+        // ---- the lone lead, long and mournful with generous silence, and in
+        // the body a smoky sax-like line answering it
+        const PAT_DRIFT: &[Pattern] = &[&[(0, 8)], &[(2, 6)], &[(0, 6)], &[(0, 4), (4, 4)], &[(3, 5)]];
+        let lead_on = |b: u32| {
+            if b < lead_in || b + 2 >= n {
+                false
+            } else if b < body {
+                (b - lead_in) % 6 < 4
+            } else if b < recede {
+                (b - body) % 8 < 4
+            } else {
+                b - recede < 4
+            }
+        };
+        let sax_on = |b: u32| b >= sax_from && b < recede && (4..7).contains(&((b - body) % 8));
+        let lead: Vec<Option<Inst>> = (0..n).map(|b| lead_on(b).then_some(Inst::Violin)).collect();
+        let sax: Vec<Option<Inst>> = (0..n).map(|b| sax_on(b).then_some(Inst::Brass)).collect();
+        let mut cfg =
+            MelodyCfg { lo: 2, hi: 11, patterns: PAT_DRIFT, phrase_bars: 4, vel: 64.0, rest_bar_prob: 0.2, ornaments: false };
+        self.vary_melody(&mut cfg);
+        let mut mrng = self.rng("melody");
+        let mut line = self.melody(&mut mrng, &cfg, &lead);
+        let cfg =
+            MelodyCfg { lo: -2, hi: 7, patterns: PAT_SLOW_44, phrase_bars: 4, vel: 54.0, rest_bar_prob: 0.3, ornaments: true };
+        let mut srng = self.rng("sax");
+        line.extend(self.melody(&mut srng, &cfg, &sax));
+        // played loosely, almost out of time
+        let mut rubato = self.rng("rubato");
+        for note in line.iter_mut() {
+            note.start = (note.start as f64 + rubato.gauss() * beat as f64 / 8.0).max(0.0) as u32;
+        }
+        self.notes.extend(line);
+    }
+
     fn arrange(&mut self, secs_per_bar: f64) {
         // a score is arranged as it is written
         if self.p.version < 2 || self.p.style.is_score() {
@@ -3644,6 +3891,29 @@ mod tests {
             // the long riser ends on the hit
             let riser = s.notes.iter().find(|n| n.key == fx::RISER_LONG && n.inst == Inst::Fx).unwrap();
             assert!(riser.end().abs_diff(peak * bar) < bar / 8, "seed {seed}");
+        }
+    }
+
+    /// Megacity Rain broods: rain from the first bar to the last, an opening
+    /// of only the city and the lead, soft drums only in the body, and an
+    /// ending left hanging on a suspended chord.
+    #[test]
+    fn the_rain_score_broods() {
+        use crate::kit::{drum, fx};
+        for seed in 1..9u64 {
+            let p = Params { style: Style::MegacityRain, seed, tempo: 66.0, ..Params::default() };
+            let s = generate(&p);
+            let bar = s.bar_ticks();
+            let rain = s.notes.iter().find(|n| n.inst == Inst::Fx && n.key == fx::RAIN).unwrap();
+            assert!(rain.start == 0 && rain.end() >= s.bars * bar);
+            let opening: Vec<Inst> = s.notes.iter().filter(|n| n.start < 8 * bar).map(|n| n.inst).collect();
+            assert!(opening.iter().all(|i| matches!(i, Inst::Fx | Inst::Violin)), "seed {seed}");
+            let drums: Vec<&Note> = s.notes.iter().filter(|n| n.inst == Inst::Drums).collect();
+            assert!(!drums.is_empty());
+            assert!(drums.iter().all(|n| n.start > s.bars * bar / 4 && n.start < s.bars * bar * 9 / 10));
+            assert!(drums.iter().all(|n| n.vel < 100), "seed {seed}: the drums stay soft");
+            assert!(drums.iter().any(|n| n.key == drum::GATED_SNARE));
+            assert_eq!(s.chords.last().map(|c| c.1.ends_with("sus2")), Some(true));
         }
     }
 

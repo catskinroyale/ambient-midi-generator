@@ -445,7 +445,7 @@ impl Bank {
         for s in sounds {
             let data: Vec<i16> = s.data.iter().map(|v| (*v as f64 * PEAK * 32767.0).round() as i16).collect();
             // a sustained sound swells in and dies away slowly
-            let gens = if s.looped.is_some() { env(0.6, 2.5) } else { Vec::new() };
+            let gens = if s.looped.is_some() { env(s.fades.0, s.fades.1) } else { Vec::new() };
             self.samples.push(Sample { name: s.name.to_string(), data, looped: s.looped, root: s.root, cents: 0 });
             zones.push(Zone { keys: s.keys, vels: (0, 127), sample: self.samples.len() - 1, gens });
         }
@@ -585,6 +585,25 @@ fn design() -> Bank {
     bank.add("CS Brass", 62, brass_gens, &roots(36, 84), |r| {
         let full = |n: usize, hz: f64| lowpass(hz, 9000.0, 2) / n as f64;
         single(pad("CSBrass", r, &[(&[(-7.0, 1.0), (6.0, 1.0), (-1197.0, 0.35)], &full)]))
+    });
+
+    // A dark stab: detuned saws and an octave below, behind a filter that
+    // snaps open and shuts again at once, dying away like a struck chord.
+    let mut stab_gens = env(0.004, 0.9);
+    stab_gens.extend([
+        (DECAY_VOL, tc(1.4)),
+        (SUSTAIN_VOL, 600),
+        (INITIAL_FC, abs_cents(260.0)),
+        (FILTER_Q, 30),
+        (ATTACK_MOD_ENV, tc(0.003)),
+        (DECAY_MOD_ENV, tc(0.35)),
+        (SUSTAIN_MOD_ENV, 1000),
+        (MOD_ENV_TO_FC, 3400),
+        atten(20),
+    ]);
+    bank.add("Dark Stab", 63, stab_gens, &roots(24, 84), |r| {
+        let full = |n: usize, hz: f64| lowpass(hz, 8000.0, 2) / n as f64;
+        single(pad("DarkStab", r, &[(&[(-9.0, 1.0), (8.0, 1.0), (-1200.0, 0.6)], &full)]))
     });
 
     // A lead for slow, smoky tunes: it breathes in, brightens a little as it's
@@ -785,13 +804,14 @@ mod tests {
     use std::sync::Arc;
 
     /// (bank, program, name, keys to try)
-    const EXPECTED: [(i32, i32, &str, [i32; 2]); 16] = [
+    const EXPECTED: [(i32, i32, &str, [i32; 2]); 17] = [
         (0, 0, "Sine Keys", MELODIC),
         (0, 4, "FM Electric Piano", MELODIC),
         (0, 38, "Analog Sub Bass", MELODIC),
         (0, 45, "Analog Pluck", MELODIC),
         (0, 50, "Supersaw Strings", MELODIC),
         (0, 62, "CS Brass", MELODIC),
+        (0, 63, "Dark Stab", MELODIC),
         (0, 66, "Smoky Lead", MELODIC),
         (0, 81, "Soft Saw Lead", MELODIC),
         (0, 88, "Warm Analog Pad", MELODIC),

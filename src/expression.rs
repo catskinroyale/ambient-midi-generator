@@ -91,7 +91,8 @@ fn auto_expr(song: &Song, n: &Note, prev: Option<u8>) -> Expr {
     if !song.sustains(n.inst) {
         return Expr::default();
     }
-    if song.params.style == Style::NeonNoir {
+    // Megacity Rain's brass and leads play like Neon Noir's
+    if matches!(song.params.style, Style::NeonNoir | Style::MegacityRain) {
         return noir_expr(song, n, prev);
     }
     // a score shapes its own swells
@@ -137,7 +138,8 @@ fn noir_expr(song: &Song, n: &Note, prev: Option<u8>) -> Expr {
                 e.bend = -(0.3 + 0.35 * h);
             }
         }
-        Inst::Violin => {
+        // the lead, and Megacity Rain's sax-like line on the brass part
+        Inst::Violin | Inst::Brass => {
             e.vibrato = (0.35 + 0.4 * h(1)) * ((secs - 0.5) / 1.2).clamp(0.0, 1.0);
             if secs >= 1.5 && h(2) < 0.6 {
                 e.swell = 0.3 + 0.3 * h(3);

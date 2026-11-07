@@ -558,7 +558,8 @@ struct Sampled {
 impl Sampled {
     fn new(sr: f32, sound: &kit::Sound, key: u8) -> Self {
         let step = if sound.pitched() { 2f64.powf((key as f64 - sound.root as f64) / 12.0) } else { 1.0 };
-        let (attack, env) = if sound.looped.is_some() { (1.0 - (-1.0 / (0.6 * sr)).exp(), 0.0) } else { (1.0, 1.0) };
+        let (fade_in, fade_out) = (sound.fades.0 as f32, sound.fades.1 as f32);
+        let (attack, env) = if sound.looped.is_some() { (1.0 - (-1.0 / (fade_in * sr)).exp(), 0.0) } else { (1.0, 1.0) };
         Sampled {
             data: sound.data.clone(),
             pos: 0.0,
@@ -566,7 +567,7 @@ impl Sampled {
             looped: sound.looped,
             env,
             attack,
-            release: decay_coef(2.5, sr),
+            release: decay_coef(fade_out, sr),
             released: false,
         }
     }
@@ -1138,7 +1139,7 @@ mod tests {
             s.note_on(ch, key, 100);
             let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
             let mut peak = 0.0f32;
-            for block in 0..(sr as usize * 14 / 512) {
+            for block in 0..(sr as usize * 20 / 512) {
                 if block == sr as usize * 3 / 512 {
                     s.note_off(ch, key);
                 }

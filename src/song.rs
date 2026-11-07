@@ -29,10 +29,11 @@ pub enum Style {
     Fingerstyle,
     NeonNoir,
     TechTrailer,
+    MegacityRain,
 }
 
 impl Style {
-    pub const ALL: [Style; 22] = [
+    pub const ALL: [Style; 23] = [
         Style::EtherealPads,
         Style::Gymnopedie,
         Style::GenerativeLoops,
@@ -55,12 +56,13 @@ impl Style {
         Style::Fingerstyle,
         Style::NeonNoir,
         Style::TechTrailer,
+        Style::MegacityRain,
     ];
 
     /// A score is written as one arc, intro to build to peak to outro, for a
     /// full orchestra with drums and trailer effects.
     pub fn is_score(self) -> bool {
-        matches!(self, Style::TechTrailer)
+        matches!(self, Style::TechTrailer | Style::MegacityRain)
     }
 
     pub fn label(self) -> &'static str {
@@ -87,6 +89,7 @@ impl Style {
             Style::Fingerstyle => "Fingerstyle Guitar",
             Style::NeonNoir => "Neon Noir",
             Style::TechTrailer => "Tech Trailer",
+            Style::MegacityRain => "Megacity Rain",
         }
     }
 
@@ -161,6 +164,11 @@ impl Style {
                  grains; then a pulsing synth arpeggio, a heartbeat kick and ticking percussion, low string ostinatos, \
                  rising strings, risers and braams; a climax of huge drums, sub hits, brass and choir; and a lone piano to close."
             }
+            Style::MegacityRain => {
+                "A dystopian neo-noir synth score for a rain-soaked city at night. An evolving analogue drone, rain, distant \
+                 thunder and machinery; a lone, mournful lead; then CS-80 brass swells rolling in slow waves, sub-bass \
+                 pulses, dark stabs, soft distant drums and a smoky sax-like line in echo, building hypnotically, never to a climax."
+            }
         }
     }
 
@@ -188,6 +196,7 @@ impl Style {
             Style::Fingerstyle => 76.0,
             Style::NeonNoir => 56.0,
             Style::TechTrailer => 80.0,
+            Style::MegacityRain => 66.0,
         }
     }
 
@@ -236,6 +245,12 @@ impl Style {
                 sounds: Sounds { keys: 0, pad: 49, lead: 52, bass: 48, pluck: 45, ..Sounds::default() },
                 electronic: &[Inst::Pizzicato, Inst::Drums, Inst::Fx],
             }),
+            // crystal bells, CS brass, a soft saw lead, sub bass, dark stabs,
+            // the smoky lead as the sax, and the kit and effects
+            Style::MegacityRain => Some(SuggestedSounds {
+                sounds: Sounds { keys: 98, pad: 62, lead: 81, bass: 38, pluck: 63, brass: 66, ..Sounds::default() },
+                electronic: &Inst::ALL,
+            }),
             _ => None,
         }
     }
@@ -273,6 +288,28 @@ impl Style {
                 echo: Echo { time: EchoTime::DottedEighth, feedback: 0.4, tone: 0.35, to_reverb: 0.6, ..Echo::default() },
                 ..Fx::default()
             }),
+            // the vast, dark digital hall, tape wobble, detuned ensemble, and
+            // long dark echo trails
+            Style::MegacityRain => Some(Fx {
+                space: Space::Noir,
+                size: 0.75,
+                tone: 0.35,
+                motion: 0.6,
+                predelay: 0.2,
+                low_cut: 0.6,
+                width: 0.8,
+                drift: 0.3,
+                ensemble: 0.45,
+                echo: Echo {
+                    time: EchoTime::DottedQuarter,
+                    feedback: 0.55,
+                    tone: 0.3,
+                    ping_pong: true,
+                    to_reverb: 0.7,
+                    wow: 0.4,
+                },
+                ..Fx::default()
+            }),
             _ => None,
         }
     }
@@ -284,15 +321,26 @@ impl Style {
         if self.is_score() {
             mix.ensure_parts(&Inst::ALL);
             // (part, fader, reverb send, echo send)
-            let strips: [(Inst, f32, f32, f32); 6] = [
-                (Inst::Piano, 0.0, 0.7, 0.25),
-                (Inst::Cello, -1.0, 0.35, 0.0),
-                (Inst::Pizzicato, -3.0, 0.4, 0.15),
-                (Inst::Brass, -2.0, 0.5, 0.0),
-                (Inst::Drums, -5.0, 0.3, 0.0),
-                (Inst::Fx, -6.0, 0.35, 0.0),
-            ];
-            for (inst, db, reverb, echo) in strips {
+            let strips: &[(Inst, f32, f32, f32)] = match self {
+                Style::MegacityRain => &[
+                    (Inst::Piano, 0.0, 0.8, 0.5),
+                    (Inst::Violin, 0.0, 0.6, 0.35),
+                    (Inst::Cello, 0.0, 0.25, 0.0),
+                    (Inst::Pizzicato, 0.0, 0.6, 0.45),
+                    (Inst::Brass, -1.0, 0.65, 0.45),
+                    (Inst::Drums, -6.0, 0.65, 0.1),
+                    (Inst::Fx, -3.0, 0.4, 0.0),
+                ],
+                _ => &[
+                    (Inst::Piano, 0.0, 0.7, 0.25),
+                    (Inst::Cello, -1.0, 0.35, 0.0),
+                    (Inst::Pizzicato, -3.0, 0.4, 0.15),
+                    (Inst::Brass, -2.0, 0.5, 0.0),
+                    (Inst::Drums, -5.0, 0.3, 0.0),
+                    (Inst::Fx, -6.0, 0.35, 0.0),
+                ],
+            };
+            for &(inst, db, reverb, echo) in strips {
                 let s = mix.strip_of(inst);
                 mix.strips[s].gain_db = db;
                 mix.strips[s].reverb = reverb;
@@ -352,6 +400,8 @@ impl Style {
                 brass: &[61, 60, 62],
                 ..pal(&[0, 4, 98], &[49, 48, 50, 94], &[52, 91, 53], &[48, 42, 43], &[45, 38, 81])
             },
+            // the lead stays a warm polysynth and the brass part the smoky sax
+            Style::MegacityRain => Palette { brass: &[66], ..pal(&[98, 4], &[62, 88, 95], &[81, 50], &[38], &[63]) },
         }
     }
 }
@@ -1034,6 +1084,7 @@ pub const SOUNDS: &[Sound] = &[
     snd(81, "Saw Lead", "Synth"),
     snd(98, "Crystal", "Synth"),
     snd(62, "Synth Brass", "Synth"),
+    snd(63, "Synth Brass 2", "Synth"),
     snd(73, "Flute", "Winds"),
     snd(75, "Pan Flute", "Winds"),
     snd(77, "Shakuhachi", "Winds"),

@@ -7,11 +7,15 @@ All notable changes to this project are documented here. The project uses
 
 ### Added
 - Scores: pieces written as one arc (intro, build, peak and outro, scaled to the chosen length) for a full orchestra, listed under **Scores** in the Style menu. The first is **Tech Trailer**, a hybrid trailer score for technology and the future: a lone felt piano motif over a sub drone and glassy grains; a build of pulsing synth arpeggio, heartbeat kick, ticking percussion, low string ostinato, rising strings, brass swells, risers and braams; a peak of big drums, sub hits, braams, brass and choir that can double up in the final third; and a lone piano to close on a soft hit. The seed varies the motif, arpeggio, ostinato, drums, brass and chords. Choosing a score switches a major key to minor and sets up its effects and mix.
+- A second score, **Megacity Rain**: dystopian neo-noir synthwave for a rain-soaked city at night. Rain, an evolving analogue drone, distant thunder, machinery and metal; a lone, mournful polysynth lead; then CS-80 brass in slow waves, sub-bass pulses, dark synth-brass stabs, neon buzz, soft distant drums in slow two-bar phrases and a smoky sax-like line in echo, building hypnotically without a climax and ending unresolved.
+- A Dark Stab preset (Synth Brass 2) in the Ambient Electronic SoundFont (17 in all).
+- New sounds in Trailer Kit and Trailer FX: a dull kick, a gated snare, rain, distant thunder, machinery hum, neon buzz, distant metal and an evolving analogue drone.
 - Three parts for the scores: Brass, Drums (on the General MIDI drum channel, with a choice of drum kit) and FX. They only show in Parts, the mixer and the assign dialog when the piece uses them.
 - Trailer Kit and Trailer FX presets in the Ambient Electronic SoundFont (16 in all): heartbeat and trailer kicks, taiko toms, snare, clap, ticks, hats and crash; a sub drone, 808-style sub booms, braams, risers, reversed cymbals, a whoosh, a downlifter, an impact and glassy grains, all synthesised. The built-in synth plays the same sounds.
 - Brass Section and Trombone sounds.
 
 ### Changed
+- Slideshow images can stay up for up to 16 seconds and crossfade for up to 8 (at most half the time on screen). New slideshows start at 12 seconds per image with a 6-second crossfade, instead of 6 and 1.
 - The mixer's **Reset** returns to the style's own mix, rather than always to plain channels.
 - The part legend under the piano roll shows only the parts' names when their sounds don't fit beside the piece's details.
 
