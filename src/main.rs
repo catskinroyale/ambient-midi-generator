@@ -6,6 +6,7 @@ mod app;
 mod expression;
 mod fonts;
 mod generator;
+mod kit;
 #[cfg(target_os = "macos")]
 mod menu;
 mod midi_export;

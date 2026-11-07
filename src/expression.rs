@@ -21,7 +21,7 @@ const FALL_SECS: f64 = 0.9;
 pub fn apply(song: &mut Song) {
     let edits: Vec<NoteEdit> = song.params.piece_edits().cloned().collect();
     let auto = song.params.version >= 3;
-    let mut prev: [Option<u8>; 5] = [None; 5];
+    let mut prev = [None; Inst::ALL.len()];
     let mut notes = Vec::with_capacity(song.notes.len());
     let mut exprs = Vec::with_capacity(song.notes.len());
     let mut off = Vec::new();
@@ -93,6 +93,10 @@ fn auto_expr(song: &Song, n: &Note, prev: Option<u8>) -> Expr {
     }
     if song.params.style == Style::NeonNoir {
         return noir_expr(song, n, prev);
+    }
+    // a score shapes its own swells
+    if song.params.style.is_score() {
+        return Expr::default();
     }
     if !matches!(n.inst, Inst::Violin | Inst::Cello) {
         return Expr::default();

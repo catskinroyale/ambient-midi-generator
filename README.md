@@ -1,6 +1,6 @@
 # Ambient MIDI Generator
 
-A Rust desktop app (egui) that generates calm piano, string and electronic music in sixteen ambient styles. You can play it in the app, save it as a MIDI file or export it as a WAV.
+A Rust desktop app (egui) that generates calm piano, string and electronic music in twenty-one styles, and cinematic scores. You can play it in the app, save it as a MIDI file or export it as a WAV.
 
 ```sh
 cargo run --release
@@ -32,6 +32,16 @@ cargo run --release
 | Fingerstyle Guitar | Travis-picked nylon guitar: alternating bass under syncopated treble, soft strings and a simple tune |
 | Neon Noir | electronic, in the spirit of Vangelis's *Blade Runner*: CS-80-style brass swells that sag in pitch at the end of each phrase, a smoky lead with deep vibrato over a low drone, bells falling like rain, and sometimes a slow heartbeat or a ticking pulse |
 
+## Scores
+
+A score is written as one arc rather than in sections that repeat: an intro, a build, a peak and an outro, scaled to the length you choose. Scores are listed under **Scores** in the Style menu and play a full orchestra with three extra parts: **Brass**, **Drums** and **FX** (a sub drone, 808-style sub booms, braams, risers, reversed cymbals, whooshes, impacts and glassy grains). Choosing a score switches a major key to minor, and sets up its effects and a mixer channel for each of its parts.
+
+| Score | Arc |
+|---|---|
+| Tech Trailer | a hybrid trailer score for technology and the future, around 80 bpm. A lone felt piano motif with long reverb tails over a sub drone and glassy grains; a build that layers a pulsing synth arpeggio, a heartbeat kick, ticking filtered percussion, a low string ostinato, strings rising in pitch, brass swells, risers, reversed cymbals and braams; a breath, then a climax of big half-time drums, sub hits, braams, soaring strings, brass and choir, often doubling up in the final third; and an outro back to a lone piano, ending on a soft hit |
+
+Its variants change the piano motif's rhythm and notes, the arpeggio, the string ostinato, whether the peak is led by taiko drums or the kit, whether the drums double up, the brass voicing and the chords, which lift from minor towards major at the peak.
+
 Every style has a palette of sounds that suit it. With **Sounds follow the seed** on (in Parts), each new seed or style picks its sounds from the palette, so pieces don't all use the same instruments. The electronic styles keep to the bundled Ambient Electronic SoundFont. **Style's sounds** puts back the sounds a style is written for, and **Shuffle** picks others. Turn the option off to keep the sounds you chose; then only the electronic styles and those with their own instruments change the sounds when you choose them. Neon Noir also brings its own effects: the Noir hall, the ensemble chorus and an echo on the lead and bells. Choosing another style puts them back, unless you've changed them.
 
 Pieces develop as they go. Each seed picks a song form, such as A A B A, A B A C or A B C A, from a larger set of chord progressions, and sections come back a little changed. The arrangement also changes from section to section:
@@ -46,12 +56,12 @@ Recipes saved by earlier versions keep their `"version"` and play exactly as bef
 ## Controls
 
 - **Key / mode**: any root note, in major, lydian, mixolydian, dorian, minor or phrygian.
-- **Instruments**: piano, strings, or both. Each style re-orchestrates itself for the choice you make.
+- **Instruments**: piano, strings, or both. Each style re-orchestrates itself for the choice you make. Scores always play their whole orchestra.
 - **Length**: set a target duration (mm:ss) or a number of bars. The piece ends on the tonic, with a ring-out.
 - **Density, Variation, Dynamics, Humanize**: shape the result. Density thins or fills every part: melody, accompaniment rhythm, bass movement and how soon strings and pads join in. Each slider is labelled at both ends with which way is less and which is more, such as sparse ◀ ▶ busy.
-- **Parts**: each piece is arranged into up to five parts: Keys, Pad, Lead, Bass and Pluck. For each part you can:
+- **Parts**: each piece is arranged into up to five parts: Keys, Pad, Lead, Bass and Pluck. Scores add Brass, Drums and FX. For each part you can:
   - switch it on or off. Switching a part off leaves the others note-for-note identical, and the piece keeps the same length.
-  - choose its sound from about 40 General MIDI sounds: pianos, electric piano, celesta, glockenspiel, music box, vibraphone, marimba, kalimba, tubular bells, harp, guitars, koto, strings, choirs, pads, flute, pan flute, shakuhachi, clarinet, oboe, bassoon, French horn, tenor sax and synth brass.
+  - choose its sound from about 45 General MIDI sounds: pianos, electric piano, celesta, glockenspiel, music box, vibraphone, marimba, kalimba, tubular bells, harp, guitars, koto, strings, choirs, pads, flute, pan flute, shakuhachi, clarinet, oboe, bassoon, French horn, brass section, trombone, tenor sax and synth brass. The drums choose a drum kit.
   Both choices are saved in the recipe and in the MIDI file. Parts the current style doesn't use are greyed out.
 - **Effects & tuning**: these change the sound but not the notes, and apply straight away while the piece plays:
   - **Space**: Room, Plate (bright and dense, blooming at once), Hall, Cathedral, Noir (a vast, dark 1980s digital hall: a long pause before it blooms, then a slow, chorused tail), Shimmer (the tail rises an octave), Cloud (granular: the reverb is fed scattered, slightly detuned fragments of what was just played) or Black Hole (enormous, slowly swirling and almost endless).
@@ -82,11 +92,11 @@ You can load several SoundFonts at once. They are used for both playback and WAV
 This repo includes two SoundFonts in `soundfonts/`, and the app loads both at startup:
 
 - [GeneralUser GS](https://schristiancollins.com/generaluser.php) by S. Christian Collins, a General MIDI font and the main sound. Its licence is in `soundfonts/GeneralUser-GS-LICENSE.txt`.
-- **Ambient Electronic**, 14 synthesiser presets made for this app: Sine Keys, FM Electric Piano, Analog Sub Bass, Analog Pluck, Supersaw Strings, CS Brass (detuned saws behind a filter that swells open, CS-80 style), Smoky Lead (a breathy, reedy lead), Soft Saw Lead, Warm Analog Pad, Glass Pad, Airy Choir, Halo Pad, Sweep Pad and Crystal Bells. They sit at their General MIDI program numbers. It contains no recorded samples: `examples/make_soundfont.rs` synthesises every sound, and `cargo run --release --example make_soundfont` rebuilds the file exactly. It is under the MIT License, like the code.
+- **Ambient Electronic**, 16 synthesiser presets made for this app: Sine Keys, FM Electric Piano, Analog Sub Bass, Analog Pluck, Supersaw Strings, CS Brass (detuned saws behind a filter that swells open, CS-80 style), Smoky Lead (a breathy, reedy lead), Soft Saw Lead, Warm Analog Pad, Glass Pad, Airy Choir, Halo Pad, Sweep Pad and Crystal Bells, plus the scores' **Trailer Kit** and **Trailer FX**. They sit at their General MIDI program numbers: the Trailer Kit is in the drum bank at the Orchestra kit's place (48), and Trailer FX at Reverse Cymbal (119). The kit's keys follow the General MIDI drum map (heartbeat kick 35, kick 36, tick 37, snare 38, clap 39, taiko toms 41, 43 and 45, filtered hat 42, crash 49). On Trailer FX, keys 24–35 hold the sub drone, 36–47 the sub booms and 48–59 the braams (both an octave below the key), 60 and 61 risers of 4 and 8 seconds, 62 and 63 reversed cymbals of 2 and 4 seconds, 64 a whoosh, 65 a downlifter, 67 an impact, and 72–83 the glassy grains. The built-in synth plays the same kit and effects, so scores sound much the same without the SoundFont. It contains no recorded samples: `examples/make_soundfont.rs` synthesises every sound, and `cargo run --release --example make_soundfont` rebuilds the file exactly. It is under the MIT License, like the code.
 
 To build a macOS app bundle with the icon and SoundFont, run `./scripts/bundle_macos.sh`. The bundle is written to `dist/`.
 
-Saved MIDI files are standard type-1 files with one track per instrument and General MIDI programs set. They open in any DAW.
+Saved MIDI files are standard type-1 files with one track per instrument and General MIDI programs set. They open in any DAW. A score's drums are on the General MIDI drum channel (10). Its FX track is meant for the Trailer FX preset: a General MIDI player plays it as reversed cymbals.
 
 Click or drag on the piano roll to seek. Space bar plays and pauses.
 
@@ -133,7 +143,7 @@ cargo test --release
 
 The tests check that output is deterministic, that pieces hit the target length, that every style works with every instrument choice, that the recipe survives a MIDI round trip, and that render levels and speed are reasonable.
 
-To check the interface without clicking through it, run the app with `MIDIGEN_SCREENSHOT=window.bmp`. It saves a picture of its window and quits, using its own settings rather than yours. `MIDIGEN_SCREENSHOT_SHOW` can open parts first, comma-separated: `sections`, `sound`, `fonts`, `slideshow`, `images` (the slideshow fitting a track to 50 images), `electronic`, `about` or `libraries`.
+To check the interface without clicking through it, run the app with `MIDIGEN_SCREENSHOT=window.bmp`. It saves a picture of its window and quits, using its own settings rather than yours. `MIDIGEN_SCREENSHOT_SHOW` can open parts first, comma-separated: `sections`, `sound`, `fonts`, `slideshow`, `images` (the slideshow fitting a track to 50 images), `electronic`, `noir`, `trailer` (start on the Tech Trailer score), `mixer`, `about` or `libraries`.
 
 ## Licence
 

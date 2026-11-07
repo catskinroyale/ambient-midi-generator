@@ -10,6 +10,11 @@
 
 use std::f64::consts::{PI, TAU};
 
+/// The score kit's drums and effects, shared with the app's built-in synth.
+#[path = "../src/kit.rs"]
+#[allow(dead_code)]
+mod kit;
+
 const SR: f64 = 44100.0;
 /// Highest partial synthesised: a sample played 5 semitones above its root stays under ~0.45·sr.
 const MAX_HZ: f64 = 14_500.0;
@@ -392,10 +397,13 @@ struct Zone {
     keys: (u8, u8),
     vels: (u8, u8),
     sample: usize,
+    /// Generators for this zone alone, over the instrument's.
+    gens: Vec<(u16, i16)>,
 }
 
 struct Instrument {
     name: &'static str,
+    bank: u16,
     program: u16,
     gens: Vec<(u16, i16)>,
     zones: Vec<Zone>,
@@ -424,10 +432,24 @@ impl Bank {
             let hi = if i + 1 == roots.len() { 127 } else { root + 5 };
             for (vels, sample) in make(root) {
                 self.samples.push(sample);
-                zones.push(Zone { keys: (lo, hi), vels, sample: self.samples.len() - 1 });
+                zones.push(Zone { keys: (lo, hi), vels, sample: self.samples.len() - 1, gens: Vec::new() });
             }
         }
-        self.instruments.push(Instrument { name, program, gens, zones });
+        self.instruments.push(Instrument { name, bank: 0, program, gens, zones });
+    }
+
+    /// A preset of the score kit's sounds, each on its own keys. Its samples
+    /// keep the kit's levels rather than being normalised.
+    fn add_kit(&mut self, name: &'static str, bank: u16, program: u16, gens: Vec<(u16, i16)>, sounds: Vec<kit::Sound>) {
+        let mut zones = Vec::new();
+        for s in sounds {
+            let data: Vec<i16> = s.data.iter().map(|v| (*v as f64 * PEAK * 32767.0).round() as i16).collect();
+            // a sustained sound swells in and dies away slowly
+            let gens = if s.looped.is_some() { env(0.6, 2.5) } else { Vec::new() };
+            self.samples.push(Sample { name: s.name.to_string(), data, looped: s.looped, root: s.root, cents: 0 });
+            zones.push(Zone { keys: s.keys, vels: (0, 127), sample: self.samples.len() - 1, gens });
+        }
+        self.instruments.push(Instrument { name, bank, program, gens, zones });
     }
 }
 
@@ -584,6 +606,12 @@ fn design() -> Bank {
     bank.add("Crystal Bells", 98, [env(0.001, 1.5), vec![atten(0)]].concat(), &roots(36, 96), |r| {
         single(bells(r))
     });
+
+    // The score kit: trailer drums in the drum bank, at the Orchestra kit's
+    // place, and the trailer effects at General MIDI's Reverse Cymbal. Their
+    // long releases let a hit ring on after its note ends.
+    bank.add_kit("Trailer Kit", 128, kit::KIT_PROGRAM as u16, env(0.001, 1.5), kit::drums(SR));
+    bank.add_kit("Trailer FX", 0, kit::FX_PROGRAM as u16, env(0.001, 6.0), kit::effects(SR));
     bank
 }
 
@@ -677,7 +705,7 @@ fn write_sf2(bank: &Bank) -> Vec<u8> {
     for (i, ins) in bank.instruments.iter().enumerate() {
         phdr.extend(name20(ins.name));
         phdr.extend(ins.program.to_le_bytes());
-        phdr.extend(0u16.to_le_bytes()); // bank
+        phdr.extend(ins.bank.to_le_bytes());
         phdr.extend((i as u16).to_le_bytes());
         phdr.extend([0u8; 12]); // library, genre, morphology
         pbag.extend(((i as u16).to_le_bytes()).iter().chain(&0u16.to_le_bytes()));
@@ -699,6 +727,9 @@ fn write_sf2(bank: &Bank) -> Vec<u8> {
             ibag_count += 1;
             gen_record(&mut igen, KEY_RANGE, range(z.keys.0, z.keys.1));
             gen_record(&mut igen, VEL_RANGE, range(z.vels.0, z.vels.1));
+            for &(op, amount) in &z.gens {
+                gen_record(&mut igen, op, amount);
+            }
             gen_record(&mut igen, ROOT_KEY, s.root as i16);
             gen_record(&mut igen, SAMPLE_MODES, s.looped.is_some() as i16);
             gen_record(&mut igen, SAMPLE_ID, z.sample as i16);
@@ -753,35 +784,41 @@ mod tests {
     use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
     use std::sync::Arc;
 
-    const EXPECTED: [(i32, &str); 14] = [
-        (0, "Sine Keys"),
-        (4, "FM Electric Piano"),
-        (38, "Analog Sub Bass"),
-        (45, "Analog Pluck"),
-        (50, "Supersaw Strings"),
-        (62, "CS Brass"),
-        (66, "Smoky Lead"),
-        (81, "Soft Saw Lead"),
-        (88, "Warm Analog Pad"),
-        (89, "Glass Pad"),
-        (91, "Airy Choir"),
-        (94, "Halo Pad"),
-        (95, "Sweep Pad"),
-        (98, "Crystal Bells"),
+    /// (bank, program, name, keys to try)
+    const EXPECTED: [(i32, i32, &str, [i32; 2]); 16] = [
+        (0, 0, "Sine Keys", MELODIC),
+        (0, 4, "FM Electric Piano", MELODIC),
+        (0, 38, "Analog Sub Bass", MELODIC),
+        (0, 45, "Analog Pluck", MELODIC),
+        (0, 50, "Supersaw Strings", MELODIC),
+        (0, 62, "CS Brass", MELODIC),
+        (0, 66, "Smoky Lead", MELODIC),
+        (0, 81, "Soft Saw Lead", MELODIC),
+        (0, 88, "Warm Analog Pad", MELODIC),
+        (0, 89, "Glass Pad", MELODIC),
+        (0, 91, "Airy Choir", MELODIC),
+        (0, 94, "Halo Pad", MELODIC),
+        (0, 95, "Sweep Pad", MELODIC),
+        (0, 98, "Crystal Bells", MELODIC),
+        (0, 119, "Trailer FX", [48, 67]),
+        (128, 48, "Trailer Kit", [36, 41]),
     ];
+    const MELODIC: [i32; 2] = [48, 72];
 
     /// Holds `key` for 3 s then releases it for 2 s; returns (peak, held RMS, max step in
     /// the steady part of the held section).
-    fn play(sf: &Arc<SoundFont>, program: i32, key: i32) -> (f32, f32, f32) {
+    fn play(sf: &Arc<SoundFont>, bank: i32, program: i32, key: i32) -> (f32, f32, f32) {
         let mut settings = SynthesizerSettings::new(44100);
         settings.enable_reverb_and_chorus = false;
         let mut synth = Synthesizer::new(sf, &settings).unwrap();
-        synth.process_midi_message(0, 0xC0, program, 0);
+        // the drum bank plays on the drum channel
+        let ch = if bank == 128 { 9 } else { 0 };
+        synth.process_midi_message(ch, 0xC0, program, 0);
         let (held, tail) = (3 * 44100, 2 * 44100);
         let (mut l, mut r) = (vec![0.0f32; held + tail], vec![0.0f32; held + tail]);
-        synth.note_on(0, key, 100);
+        synth.note_on(ch, key, 100);
         synth.render(&mut l[..held], &mut r[..held]);
-        synth.note_off(0, key);
+        synth.note_off(ch, key);
         synth.render(&mut l[held..], &mut r[held..]);
         let peak = l.iter().chain(&r).fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(l.iter().chain(&r).all(|v| v.is_finite()));
@@ -801,11 +838,15 @@ mod tests {
         let info = sf.get_info();
         assert_eq!(info.get_bank_name(), "Ambient Electronic");
         assert_eq!(sf.get_presets().len(), EXPECTED.len());
-        for (program, name) in EXPECTED {
-            let p = sf.get_presets().iter().find(|p| p.get_patch_number() == program).unwrap();
-            assert_eq!((p.get_name(), p.get_bank_number()), (name, 0));
-            for key in [48, 72] {
-                let (peak, rms, step) = play(&sf, program, key);
+        for (bank, program, name, keys) in EXPECTED {
+            let p = sf
+                .get_presets()
+                .iter()
+                .find(|p| p.get_patch_number() == program && p.get_bank_number() == bank)
+                .unwrap();
+            assert_eq!(p.get_name(), name);
+            for key in keys {
+                let (peak, rms, step) = play(&sf, bank, program, key);
                 println!("{program:3} {name:18} key {key}: peak {peak:.3} rms {rms:.4} max step {step:.4}");
                 assert!(peak > 0.02 && peak < 1.0, "{name} key {key}: peak {peak}");
             }

@@ -49,8 +49,8 @@ impl MixerView {
         }
     }
 
-    /// Returns true when the mix changed.
-    pub fn show(&mut self, ui: &mut Ui, mix: &mut Mix, parts: &[PartInfo], meters: &Meters) -> bool {
+    /// Returns true when the mix changed. Reset goes back to `reset`, the style's own mix.
+    pub fn show(&mut self, ui: &mut Ui, mix: &mut Mix, reset: &Mix, parts: &[PartInfo], meters: &Meters) -> bool {
         self.update(meters);
         let before = mix.clone();
         let t = Tokens::get(ui.ctx());
@@ -77,11 +77,11 @@ impl MixerView {
                         mix.add_strip();
                     }
                     ui.add_space(4.0);
-                    if crate::widgets::text_button(ui, "Reset", false, *mix != Mix::default())
-                        .on_hover_text("A channel for each part, all at 0 dB in the centre")
+                    if crate::widgets::text_button(ui, "Reset", false, mix != reset)
+                        .on_hover_text("Back to the style's own mix: a channel for each part, in the centre")
                         .clicked()
                     {
-                        *mix = Mix::default();
+                        *mix = reset.clone();
                     }
                 });
                 ui.add_space(8.0);

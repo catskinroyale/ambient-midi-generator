@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::kit::{FX_PROGRAM, KIT_PROGRAM};
 use crate::theory::{Mode, NOTE_NAMES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,10 +28,11 @@ pub enum Style {
     Gamelan,
     Fingerstyle,
     NeonNoir,
+    TechTrailer,
 }
 
 impl Style {
-    pub const ALL: [Style; 21] = [
+    pub const ALL: [Style; 22] = [
         Style::EtherealPads,
         Style::Gymnopedie,
         Style::GenerativeLoops,
@@ -52,7 +54,14 @@ impl Style {
         Style::Gamelan,
         Style::Fingerstyle,
         Style::NeonNoir,
+        Style::TechTrailer,
     ];
+
+    /// A score is written as one arc, intro to build to peak to outro, for a
+    /// full orchestra with drums and trailer effects.
+    pub fn is_score(self) -> bool {
+        matches!(self, Style::TechTrailer)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -77,6 +86,7 @@ impl Style {
             Style::Gamelan => "Gamelan Shimmer",
             Style::Fingerstyle => "Fingerstyle Guitar",
             Style::NeonNoir => "Neon Noir",
+            Style::TechTrailer => "Tech Trailer",
         }
     }
 
@@ -146,6 +156,11 @@ impl Style {
                 "Electronic, in the spirit of Vangelis's Blade Runner: slow brass swells that sag in pitch as they die away, \
                  a smoky lead over a deep drone, bells like rain, and a vast, dark hall."
             }
+            Style::TechTrailer => {
+                "A hybrid trailer score for technology and the future. A lone felt piano motif over a sub drone and glassy \
+                 grains; then a pulsing synth arpeggio, a heartbeat kick and ticking percussion, low string ostinatos, \
+                 rising strings, risers and braams; a climax of huge drums, sub hits, brass and choir; and a lone piano to close."
+            }
         }
     }
 
@@ -172,6 +187,7 @@ impl Style {
             Style::Gamelan => 72.0,
             Style::Fingerstyle => 76.0,
             Style::NeonNoir => 56.0,
+            Style::TechTrailer => 80.0,
         }
     }
 
@@ -190,12 +206,12 @@ impl Style {
     /// The sounds this style is written for, if they differ from the defaults.
     pub fn suggested_sounds(self) -> Option<SuggestedSounds> {
         let electronic = |keys, pad, lead, bass, pluck| SuggestedSounds {
-            sounds: Sounds { keys, pad, lead, bass, pluck },
-            electronic: true,
+            sounds: Sounds { keys, pad, lead, bass, pluck, ..Sounds::default() },
+            electronic: &Inst::ALL,
         };
         let acoustic = |keys, pad, lead, bass, pluck| SuggestedSounds {
-            sounds: Sounds { keys, pad, lead, bass, pluck },
-            electronic: false,
+            sounds: Sounds { keys, pad, lead, bass, pluck, ..Sounds::default() },
+            electronic: &[],
         };
         match self {
             // Sub bass, analogue pluck and saw lead, warm or sweeping pads, crystal bells
@@ -214,6 +230,12 @@ impl Style {
             Style::Gamelan => Some(acoustic(11, 89, 75, 14, 9)),
             // nylon guitar, slow strings, flute, acoustic bass, harp
             Style::Fingerstyle => Some(acoustic(24, 49, 73, 32, 46)),
+            // piano, slow strings, choir, low strings, the analogue pluck as the
+            // arpeggio, brass, and the trailer kit and effects
+            Style::TechTrailer => Some(SuggestedSounds {
+                sounds: Sounds { keys: 0, pad: 49, lead: 52, bass: 48, pluck: 45, ..Sounds::default() },
+                electronic: &[Inst::Pizzicato, Inst::Drums, Inst::Fx],
+            }),
             _ => None,
         }
     }
@@ -239,18 +261,49 @@ impl Style {
                 },
                 ..Fx::default()
             }),
+            // a big, clean hall that keeps the low end out of its tail, and
+            // echoes trailing off the piano
+            Style::TechTrailer => Some(Fx {
+                space: Space::Hall,
+                size: 0.65,
+                tone: 0.55,
+                predelay: 0.2,
+                low_cut: 0.65,
+                width: 0.75,
+                echo: Echo { time: EchoTime::DottedEighth, feedback: 0.4, tone: 0.35, to_reverb: 0.6, ..Echo::default() },
+                ..Fx::default()
+            }),
             _ => None,
         }
     }
 
-    /// The mix this style is written for, if it differs from the default: so
-    /// far, only echo sends.
+    /// The mix this style is written for, if it differs from the default:
+    /// echo sends, and for a score, channels for its extra parts.
     pub fn suggested_mix(self) -> Option<Mix> {
+        let mut mix = Mix::default();
+        if self.is_score() {
+            mix.ensure_parts(&Inst::ALL);
+            // (part, fader, reverb send, echo send)
+            let strips: [(Inst, f32, f32, f32); 6] = [
+                (Inst::Piano, 0.0, 0.7, 0.25),
+                (Inst::Cello, -1.0, 0.35, 0.0),
+                (Inst::Pizzicato, -3.0, 0.4, 0.15),
+                (Inst::Brass, -2.0, 0.5, 0.0),
+                (Inst::Drums, -5.0, 0.3, 0.0),
+                (Inst::Fx, -6.0, 0.35, 0.0),
+            ];
+            for (inst, db, reverb, echo) in strips {
+                let s = mix.strip_of(inst);
+                mix.strips[s].gain_db = db;
+                mix.strips[s].reverb = reverb;
+                mix.strips[s].echo = echo;
+            }
+            return Some(mix);
+        }
         let sends: &[(Inst, f32)] = match self {
             Style::NeonNoir => &[(Inst::Violin, 0.4), (Inst::Piano, 0.25)],
             _ => return None,
         };
-        let mut mix = Mix::default();
         for (inst, echo) in sends {
             let s = mix.strip_of(*inst);
             mix.strips[s].echo = *echo;
@@ -268,7 +321,7 @@ impl Style {
             bass: &'static [u8],
             pluck: &'static [u8],
         ) -> Palette {
-            Palette { keys, pad, lead, bass, pluck }
+            Palette { keys, pad, lead, bass, pluck, brass: &[BRASS], drums: &[KIT_PROGRAM], fx: &[FX_PROGRAM] }
         }
         match self {
             Style::EtherealPads => pal(&[0, 8, 11, 46, 4], &[49, 48, 89, 94, 52], &[40, 73, 41, 53], &[42, 43, 41], &[45, 46, 108]),
@@ -295,6 +348,10 @@ impl Style {
             Style::Gamelan => pal(&[11, 12, 8, 108], &[89, 94, 88, 52], &[75, 73, 77], &[14, 11], &[9, 108, 12, 98]),
             Style::Fingerstyle => pal(&[24, 25, 46], &[49, 89, 48], &[73, 40, 71, 11], &[32, 42], &[46, 24, 11]),
             Style::NeonNoir => pal(&[98, 4, 0], &[62, 88, 95, 94], &[66, 81, 91], &[38], &[45, 4, 98]),
+            Style::TechTrailer => Palette {
+                brass: &[61, 60, 62],
+                ..pal(&[0, 4, 98], &[49, 48, 50, 94], &[52, 91, 53], &[48, 42, 43], &[45, 38, 81])
+            },
         }
     }
 }
@@ -306,6 +363,9 @@ pub struct Palette {
     pub lead: &'static [u8],
     pub bass: &'static [u8],
     pub pluck: &'static [u8],
+    pub brass: &'static [u8],
+    pub drums: &'static [u8],
+    pub fx: &'static [u8],
 }
 
 impl Palette {
@@ -321,19 +381,31 @@ impl Palette {
             lead: one(self.lead),
             bass: one(self.bass),
             pluck: one(self.pluck),
+            brass: one(self.brass),
+            drums: one(self.drums),
+            fx: one(self.fx),
         }
     }
 
     pub fn first(&self) -> Sounds {
-        Sounds { keys: self.keys[0], pad: self.pad[0], lead: self.lead[0], bass: self.bass[0], pluck: self.pluck[0] }
+        Sounds {
+            keys: self.keys[0],
+            pad: self.pad[0],
+            lead: self.lead[0],
+            bass: self.bass[0],
+            pluck: self.pluck[0],
+            brass: self.brass[0],
+            drums: self.drums[0],
+            fx: self.fx[0],
+        }
     }
 }
 
-/// A style's sounds: General MIDI programs, and whether the parts should play the
+/// A style's sounds: General MIDI programs, and the parts that should play the
 /// bundled Ambient Electronic SoundFont (whose presets sit at those programs).
 pub struct SuggestedSounds {
     pub sounds: Sounds,
-    pub electronic: bool,
+    pub electronic: &'static [Inst],
 }
 
 /// The SoundFont synthesised for the electronic styles, shipped with the app.
@@ -693,8 +765,8 @@ pub struct Mix {
 impl Default for Mix {
     fn default() -> Self {
         Mix {
-            strips: Inst::ALL.iter().map(|i| Strip::named(i.role())).collect(),
-            routes: Inst::ALL.iter().enumerate().map(|(n, i)| (*i, n)).collect(),
+            strips: Inst::CORE.iter().map(|i| Strip::named(i.role())).collect(),
+            routes: Inst::CORE.iter().enumerate().map(|(n, i)| (*i, n)).collect(),
             master_db: 0.0,
         }
     }
@@ -703,7 +775,7 @@ impl Default for Mix {
 impl Mix {
     /// The strip a part plays through.
     pub fn strip_of(&self, inst: Inst) -> usize {
-        let fallback = Inst::ALL.iter().position(|i| *i == inst).unwrap_or(0);
+        let fallback = Inst::CORE.iter().position(|i| *i == inst).unwrap_or(0);
         let s = self.routes.iter().find(|(i, _)| *i == inst).map_or(fallback, |(_, s)| *s);
         s.min(self.strips.len().saturating_sub(1))
     }
@@ -727,6 +799,23 @@ impl Mix {
         }
         self.strips.push(Strip::named(&format!("Bus {}", self.strips.len() + 1)));
         Some(self.strips.len() - 1)
+    }
+
+    /// Give each of the parts that has no channel yet its own, while there is
+    /// room, else the first.
+    pub fn ensure_parts(&mut self, parts: &[Inst]) {
+        for inst in parts {
+            if self.strip_of_raw(*inst).is_some() {
+                continue;
+            }
+            let s = if self.strips.len() < MAX_STRIPS {
+                self.strips.push(Strip::named(inst.role()));
+                self.strips.len() - 1
+            } else {
+                0
+            };
+            self.set_route(*inst, s);
+        }
     }
 
     /// Remove a channel; its parts move to the first channel.
@@ -834,7 +923,7 @@ pub struct FontPreset {
     pub name: String,
 }
 
-/// GM program per part.
+/// GM program per part. For the drums it is the drum kit.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sounds {
@@ -843,11 +932,31 @@ pub struct Sounds {
     pub lead: u8,
     pub bass: u8,
     pub pluck: u8,
+    // only the scores play these; left out of recipes while they're the defaults
+    #[serde(skip_serializing_if = "is_brass")]
+    pub brass: u8,
+    #[serde(skip_serializing_if = "is_kit")]
+    pub drums: u8,
+    #[serde(skip_serializing_if = "is_fx")]
+    pub fx: u8,
+}
+
+/// The default brass: Brass Section.
+const BRASS: u8 = 61;
+
+fn is_brass(p: &u8) -> bool {
+    *p == BRASS
+}
+fn is_kit(p: &u8) -> bool {
+    *p == KIT_PROGRAM
+}
+fn is_fx(p: &u8) -> bool {
+    *p == FX_PROGRAM
 }
 
 impl Default for Sounds {
     fn default() -> Self {
-        Sounds { keys: 0, pad: 49, lead: 40, bass: 42, pluck: 45 }
+        Sounds { keys: 0, pad: 49, lead: 40, bass: 42, pluck: 45, brass: BRASS, drums: KIT_PROGRAM, fx: FX_PROGRAM }
     }
 }
 
@@ -859,6 +968,9 @@ impl Sounds {
             Inst::Violin => self.lead,
             Inst::Cello => self.bass,
             Inst::Pizzicato => self.pluck,
+            Inst::Brass => self.brass,
+            Inst::Drums => self.drums,
+            Inst::Fx => self.fx,
         }
     }
     pub fn get_mut(&mut self, inst: Inst) -> &mut u8 {
@@ -868,6 +980,9 @@ impl Sounds {
             Inst::Violin => &mut self.lead,
             Inst::Cello => &mut self.bass,
             Inst::Pizzicato => &mut self.pluck,
+            Inst::Brass => &mut self.brass,
+            Inst::Drums => &mut self.drums,
+            Inst::Fx => &mut self.fx,
         }
     }
 }
@@ -926,11 +1041,33 @@ pub const SOUNDS: &[Sound] = &[
     snd(71, "Clarinet", "Winds"),
     snd(68, "Oboe", "Winds"),
     snd(70, "Bassoon", "Winds"),
-    snd(60, "French Horn", "Winds"),
+    snd(60, "French Horn", "Brass"),
+    snd(61, "Brass Section", "Brass"),
+    snd(57, "Trombone", "Brass"),
+    snd(FX_PROGRAM, "Trailer FX", "Effects"),
 ];
 
+/// Drum kits (General MIDI kit numbers), offered for the drum part.
+pub const KITS: &[Sound] = &[
+    snd(KIT_PROGRAM, "Orchestra Kit", "Kits"),
+    snd(0, "Standard Kit", "Kits"),
+    snd(8, "Room Kit", "Kits"),
+    snd(16, "Power Kit", "Kits"),
+    snd(25, "TR-808 Kit", "Kits"),
+];
+
+/// The sounds offered for a part.
+pub fn sounds_for(inst: Inst) -> &'static [Sound] {
+    if inst == Inst::Drums { KITS } else { SOUNDS }
+}
+
 pub fn sound_name(program: u8) -> String {
-    SOUNDS
+    part_sound_name(Inst::Piano, program)
+}
+
+/// The name of a part's General MIDI sound (for the drums, its kit).
+pub fn part_sound_name(inst: Inst, program: u8) -> String {
+    sounds_for(inst)
         .iter()
         .find(|s| s.program == program)
         .map(|s| s.name.to_string())
@@ -1072,16 +1209,30 @@ pub enum Inst {
     Violin,
     Cello,
     Pizzicato,
+    Brass,
+    Drums,
+    Fx,
 }
 
 impl Inst {
-    pub const ALL: [Inst; 5] = [
+    pub const ALL: [Inst; 8] = [
         Inst::Piano,
         Inst::StringPad,
         Inst::Violin,
         Inst::Cello,
         Inst::Pizzicato,
+        Inst::Brass,
+        Inst::Drums,
+        Inst::Fx,
     ];
+
+    /// The parts every style can use; the others only play in scores.
+    pub const CORE: [Inst; 5] = [Inst::Piano, Inst::StringPad, Inst::Violin, Inst::Cello, Inst::Pizzicato];
+
+    /// Only the scores use this part.
+    pub fn score_only(self) -> bool {
+        !Inst::CORE.contains(&self)
+    }
 
     pub fn channel(self) -> u8 {
         match self {
@@ -1090,6 +1241,10 @@ impl Inst {
             Inst::Violin => 2,
             Inst::Cello => 3,
             Inst::Pizzicato => 4,
+            Inst::Brass => 5,
+            Inst::Fx => 6,
+            // General MIDI's drum channel
+            Inst::Drums => 9,
         }
     }
 
@@ -1100,6 +1255,9 @@ impl Inst {
             Inst::Violin => 88,
             Inst::Cello => 92,
             Inst::Pizzicato => 96,
+            Inst::Brass => 92,
+            Inst::Drums => 100,
+            Inst::Fx => 100,
         }
     }
 
@@ -1111,6 +1269,9 @@ impl Inst {
             Inst::Violin => "Lead",
             Inst::Cello => "Bass",
             Inst::Pizzicato => "Pluck",
+            Inst::Brass => "Brass",
+            Inst::Drums => "Drums",
+            Inst::Fx => "FX",
         }
     }
 
@@ -1121,12 +1282,15 @@ impl Inst {
             Inst::Violin => "Melodies and high lines (strings arrangements)",
             Inst::Cello => "Bass notes and drones",
             Inst::Pizzicato => "Plucked patterns when there's no piano",
+            Inst::Brass => "Brass swells (scores)",
+            Inst::Drums => "Drums and percussion (scores)",
+            Inst::Fx => "Sub drone and booms, braams, risers, whooshes and hits (scores)",
         }
     }
 
     /// Is this a sustained part in the arrangement (legato phrasing)?
     pub fn sustains(self) -> bool {
-        matches!(self, Inst::StringPad | Inst::Violin | Inst::Cello)
+        matches!(self, Inst::StringPad | Inst::Violin | Inst::Cello | Inst::Brass)
     }
 }
 
@@ -1206,16 +1370,18 @@ impl Song {
         }
     }
 
-    /// Bank select (CC0) for the part: non-zero only for some SoundFont presets.
+    /// Bank select (CC0) for the part: non-zero only for some SoundFont
+    /// presets. Drum kits live in bank 128, which the drum channel selects
+    /// with 0.
     pub fn bank(&self, inst: Inst) -> u8 {
-        self.params.font(inst).map_or(0, |f| f.bank)
+        self.params.font(inst).map_or(0, |f| f.bank & 127)
     }
 
     /// The name of the sound a part plays.
     pub fn sound_name(&self, inst: Inst) -> String {
         match self.params.font(inst) {
             Some(f) => f.name.clone(),
-            None => sound_name(self.params.sounds.get(inst)),
+            None => part_sound_name(inst, self.params.sounds.get(inst)),
         }
     }
 

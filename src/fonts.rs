@@ -16,8 +16,10 @@ pub struct LoadedFont {
     /// File name, which is how parts refer to the font.
     pub name: String,
     pub font: Arc<rustysynth::SoundFont>,
-    /// Melodic presets, sorted by bank then program. Drum kits are left out.
+    /// Melodic presets, sorted by bank then program.
     pub presets: Vec<PresetInfo>,
+    /// Drum kits (bank 128), sorted by program.
+    pub kits: Vec<PresetInfo>,
     /// Where the font came from, so a project can save it.
     pub source: Option<FontSource>,
 }
@@ -37,6 +39,9 @@ fn role_words(inst: Inst) -> &'static [&'static str] {
         Inst::Violin => &["violin", "flute", "solo", "lead", "oboe", "clarinet", "whistle"],
         Inst::Cello => &["cello", "bass", "contrabass", "bassoon"],
         Inst::Pizzicato => &["pizz", "harp", "pluck", "guitar", "kalimba", "marimba"],
+        Inst::Brass => &["brass", "horn", "trumpet", "trombone", "tuba"],
+        Inst::Drums => &["kit", "drum", "orchestra"],
+        Inst::Fx => &["fx", "effect", "trailer", "impact", "riser"],
     }
 }
 
@@ -67,19 +72,28 @@ impl LoadedFont {
     }
 
     pub fn from_font(name: String, font: Arc<rustysynth::SoundFont>) -> Self {
-        let mut presets: Vec<PresetInfo> = font
-            .get_presets()
-            .iter()
-            .filter(|p| (0..128).contains(&p.get_bank_number()) && (0..128).contains(&p.get_patch_number()))
-            .map(|p| PresetInfo {
-                bank: p.get_bank_number() as u8,
-                preset: p.get_patch_number() as u8,
-                name: p.get_name().trim().to_string(),
-            })
-            .collect();
-        presets.sort_by_key(|p| (p.bank, p.preset));
-        presets.dedup_by_key(|p| (p.bank, p.preset));
-        LoadedFont { name, font, presets, source: None }
+        let list = |banks: std::ops::Range<i32>| {
+            let mut out: Vec<PresetInfo> = font
+                .get_presets()
+                .iter()
+                .filter(|p| banks.contains(&p.get_bank_number()) && (0..128).contains(&p.get_patch_number()))
+                .map(|p| PresetInfo {
+                    bank: p.get_bank_number() as u8,
+                    preset: p.get_patch_number() as u8,
+                    name: p.get_name().trim().to_string(),
+                })
+                .collect();
+            out.sort_by_key(|p| (p.bank, p.preset));
+            out.dedup_by_key(|p| (p.bank, p.preset));
+            out
+        };
+        let (presets, kits) = (list(0..128), list(128..129));
+        LoadedFont { name, font, presets, kits, source: None }
+    }
+
+    /// The presets a part can play: drum kits for the drums, else the melodic ones.
+    pub fn presets_for(&self, inst: Inst) -> &[PresetInfo] {
+        if inst == Inst::Drums { &self.kits } else { &self.presets }
     }
 
     pub fn is_general_midi(&self) -> bool {
@@ -87,7 +101,7 @@ impl LoadedFont {
     }
 
     pub fn find(&self, bank: u8, preset: u8) -> Option<&PresetInfo> {
-        self.presets.iter().find(|p| p.bank == bank && p.preset == preset)
+        self.presets.iter().chain(&self.kits).find(|p| p.bank == bank && p.preset == preset)
     }
 
     pub fn preset_for(&self, p: &PresetInfo) -> FontPreset {
@@ -95,6 +109,13 @@ impl LoadedFont {
     }
 
     pub fn suggest(&self, inst: Inst, program: u8) -> Option<(&PresetInfo, bool)> {
+        if inst == Inst::Drums {
+            // the kit with the same number, else the first
+            return match self.kits.iter().find(|k| k.preset == program) {
+                Some(k) => Some((k, true)),
+                None => self.kits.first().map(|k| (k, false)),
+            };
+        }
         suggest(&self.presets, inst, program)
     }
 }
@@ -154,11 +175,15 @@ mod tests {
     fn general_midi_font_keeps_programs() {
         let Ok(f) = LoadedFont::load(Path::new("soundfonts/GeneralUser-GS.sf2")) else { return };
         assert!(f.is_general_midi());
-        for inst in Inst::ALL {
+        for inst in Inst::ALL.into_iter().filter(|i| *i != Inst::Drums) {
             let (p, sure) = f.suggest(inst, 52).unwrap();
             assert!(sure);
             assert_eq!((p.bank, p.preset), (0, 52));
         }
+        // the drums get the kit with the same number
+        let (p, sure) = f.suggest(Inst::Drums, 48).unwrap();
+        assert!(sure);
+        assert_eq!((p.bank, p.preset), (128, 48));
     }
 
     /// A font embedded in a project (loaded from bytes) matches the file, and

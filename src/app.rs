@@ -20,8 +20,8 @@ use crate::player::{Cmd, Player, Timeline, render_wav};
 use crate::rng::Rng;
 use crate::slideshow::{self, Fit, Grid, Plan, Slideshow};
 use crate::song::{
-    ELECTRONIC_FONT, EchoTime, Expr, Fx, Inst, Instrumentation, Interval, LengthMode, Mix, Note, Params, SOUNDS, Song,
-    Sounds, Space, Style, Tuning, sound_name,
+    ELECTRONIC_FONT, EchoTime, Expr, Fx, Inst, Instrumentation, Interval, LengthMode, Mix, Note, Params, Song,
+    Sounds, Space, Style, Tuning, part_sound_name, sounds_for,
 };
 use crate::synth::{BuiltinSynth, SoundFontSynth, SynthEngine};
 use crate::theory::{Mode, NOTE_NAMES};
@@ -108,7 +108,9 @@ const KEY_SHOW_MIXER: &str = "show_mixer";
 
 /// What the audio engine was built from: the main font, and which channels go
 /// to which other font.
-type EngineSig = (u32, Option<String>, Vec<(u8, String)>);
+/// What the playback engine is built from: the fonts loaded, the main font,
+/// the parts with fonts of their own, and whether the piece uses the score kit.
+type EngineSig = (u32, Option<String>, Vec<(u8, String)>, bool);
 
 /// The "assign SoundFont to parts" dialog.
 struct Assign {
@@ -130,11 +132,18 @@ fn preset_label(bank: u8, preset: u8, name: &str) -> String {
 }
 
 /// A drop-down of a font's presets. Returns true if the choice changed.
-fn preset_combo(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, font: &LoadedFont, pick: &mut (u8, u8), width: f32) -> bool {
+fn preset_combo(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    font: &LoadedFont,
+    inst: Inst,
+    pick: &mut (u8, u8),
+    width: f32,
+) -> bool {
     let before = *pick;
     let text = font.find(pick.0, pick.1).map(|p| p.name.clone()).unwrap_or_else(|| "(missing preset)".into());
     egui::ComboBox::from_id_salt(id).width(width).height(420.0).truncate().selected_text(text).show_ui(ui, |ui| {
-        for p in &font.presets {
+        for p in font.presets_for(inst) {
             ui.selectable_value(pick, (p.bank, p.preset), preset_label(p.bank, p.preset, &p.name));
         }
     });
@@ -181,6 +190,9 @@ fn inst_color(i: Inst) -> Color32 {
         Inst::Violin => Color32::from_rgb(186, 156, 236),
         Inst::Cello => Color32::from_rgb(222, 128, 150),
         Inst::Pizzicato => Color32::from_rgb(150, 212, 140),
+        Inst::Brass => Color32::from_rgb(232, 150, 96),
+        Inst::Drums => Color32::from_rgb(170, 176, 190),
+        Inst::Fx => Color32::from_rgb(120, 140, 236),
     }
 }
 
@@ -307,13 +319,20 @@ impl App {
             app.status = format!("Loaded {} SoundFonts", app.fonts.len());
         }
         let snap_style = app.snapshot.as_ref().and_then(|s| {
-            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir)].into_iter().find(|(o, _)| s.wants(o)).map(|(_, st)| st)
+            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir), ("trailer", Style::TechTrailer)]
+                .into_iter()
+                .find(|(o, _)| s.wants(o))
+                .map(|(_, st)| st)
         });
         if let Some(style) = snap_style {
             let old = app.params.style;
             app.params.style = style;
             app.params.tempo = style.default_tempo();
+            if style.is_score() {
+                app.params.mode = Mode::Aeolian;
+            }
             app.apply_style_sounds(old);
+            app.sync_seed_sounds();
             app.regenerate();
         }
         app.sounds_for = (app.params.style, app.params.seed);
@@ -400,7 +419,12 @@ impl App {
             .filter(|(_, f)| Some(&f.font) != self.main_font.as_ref())
             .map(|(i, f)| (i.channel(), f.font.clone()))
             .collect();
-        (self.fonts_version, self.main_font.clone(), routes)
+        (self.fonts_version, self.main_font.clone(), routes, self.uses_kit())
+    }
+
+    /// Whether the piece has drums or trailer effects.
+    fn uses_kit(&self) -> bool {
+        self.song.parts.iter().any(|i| matches!(i, Inst::Drums | Inst::Fx))
     }
 
     /// The mixer, with an engine for each part: its own SoundFont if it has
@@ -410,8 +434,13 @@ impl App {
         let mut mix = Mixer::new(sr, meters);
         for inst in Inst::ALL {
             let own = self.song.params.font(inst).and_then(|fp| self.font(&fp.font));
+            // General MIDI has nothing like the trailer effects, so without a
+            // preset of their own the built-in synth plays them
+            let main = if inst == Inst::Fx { None } else { main };
             let engine: Box<dyn SynthEngine> = match own.or(main) {
                 Some(f) => Box::new(SoundFontSynth::new(&f.font, sr)?.dry()),
+                // the kit is made here rather than on the audio thread
+                None if matches!(inst, Inst::Drums | Inst::Fx) && self.uses_kit() => Box::new(BuiltinSynth::dry(sr).with_kit()),
                 None => Box::new(BuiltinSynth::dry(sr)),
             };
             mix.add_part(inst.channel(), engine);
@@ -538,6 +567,7 @@ impl App {
         let general_midi = font.is_general_midi();
         let rows = Inst::ALL
             .into_iter()
+            .filter(|i| !i.score_only() || self.song.parts.contains(i))
             .filter_map(|inst| {
                 let current = self.params.font(inst).filter(|f| f.font == name).map(|f| (f.bank, f.preset));
                 let (best, sure) = font.suggest(inst, self.params.sounds.get(inst))?;
@@ -613,7 +643,7 @@ impl App {
                             ui.painter().rect_filled(rect, 2.0, inst_color(row.inst));
                             ui.checkbox(&mut row.on, row.inst.role()).on_hover_text(row.inst.role_hint());
                         });
-                        if preset_combo(ui, ("assign", row.inst), font, &mut row.pick, 200.0) {
+                        if preset_combo(ui, ("assign", row.inst), font, row.inst, &mut row.pick, 200.0) {
                             row.on = true;
                         }
                         let note = if !parts.contains(&row.inst) {
@@ -900,14 +930,21 @@ impl App {
         let slideshow_bars = (self.slideshow.fit == Fit::TrackToImages).then(|| self.slide_plan());
         let p = &mut self.params;
         let before = p.style;
-        widgets::dropdown(ui, "style", "Style", p.style.label(), "The kind of piece", |ui| {
-            for s in Style::ALL {
-                ui.selectable_value(&mut p.style, s, s.label()).on_hover_text(s.description());
+        widgets::dropdown(ui, "style", "Style", p.style.label(), "The kind of piece: a style, or a score with a dramatic arc", |ui| {
+            for (heading, scores) in [("Styles", false), ("Scores", true)] {
+                ui.label(egui::RichText::new(heading).small().weak());
+                for s in Style::ALL.into_iter().filter(|s| s.is_score() == scores) {
+                    ui.selectable_value(&mut p.style, s, s.label()).on_hover_text(s.description());
+                }
             }
         });
         let style_from = (p.style != before).then_some(before);
         if style_from.is_some() {
             p.tempo = p.style.default_tempo();
+            // the scores are written in a minor key, lifting to major
+            if p.style.is_score() && p.mode == Mode::Ionian {
+                p.mode = Mode::Aeolian;
+            }
         }
         widgets::note(ui, p.style.description(), "");
         ui.add_space(4.0);
@@ -927,7 +964,9 @@ impl App {
             .iter()
             .map(|i| widgets::Segment { label: i.label(), selected: p.instrumentation == *i, enabled: true, help: "" })
             .collect();
-        if let Some(i) = widgets::segmented(ui, &segs, 3) {
+        if p.style.is_score() {
+            widgets::note(ui, "A score plays its whole orchestra. Switch parts off under Parts.", "");
+        } else if let Some(i) = widgets::segmented(ui, &segs, 3) {
             p.instrumentation = choices[i];
         }
         ui.add_space(4.0);
@@ -1314,8 +1353,9 @@ impl App {
         self.route_electronic();
     }
 
-    /// After a style change: switch to the new style's effects and echo sends
-    /// (Neon Noir has its own), unless they were changed by hand.
+    /// After a style change: switch to the new style's effects and mix (Neon
+    /// Noir and the scores have their own), unless they were changed by hand.
+    /// A score gets channels for its extra parts either way.
     fn apply_style_fx(&mut self, old: Style) {
         let p = &mut self.params;
         if p.fx == old.suggested_fx().unwrap_or_default() {
@@ -1324,23 +1364,29 @@ impl App {
         if p.mix == old.suggested_mix().unwrap_or_default() {
             p.mix = p.style.suggested_mix().unwrap_or_default();
         }
+        if p.style.is_score() {
+            p.mix.ensure_parts(&Inst::ALL);
+        }
     }
 
-    /// Route the parts of an electronic style to the Ambient Electronic
-    /// SoundFont's presets for their sounds; other styles don't use it.
+    /// Route the parts a style plays on the Ambient Electronic SoundFont (all
+    /// of an electronic style's; a score's arpeggio, drums and effects) to its
+    /// presets for their sounds.
     fn route_electronic(&mut self) {
         let p = &mut self.params;
         p.fonts.retain(|(_, f)| f.font != ELECTRONIC_FONT);
-        if !p.style.suggested_sounds().is_some_and(|s| s.electronic) {
+        let parts = p.style.suggested_sounds().map_or(&[][..], |s| s.electronic);
+        if parts.is_empty() {
             return;
         }
         let Some(font) = self.fonts.iter().find(|f| f.name == ELECTRONIC_FONT) else {
             self.status = format!("{ELECTRONIC_FONT} isn't loaded, so this style uses General MIDI synth sounds");
             return;
         };
-        for inst in Inst::ALL {
-            if let Some(preset) = font.find(0, p.sounds.get(inst)) {
-                p.set_font(inst, Some(font.preset_for(preset)));
+        for inst in parts {
+            let bank = if *inst == Inst::Drums { 128 } else { 0 };
+            if let Some(preset) = font.find(bank, p.sounds.get(*inst)) {
+                p.set_font(*inst, Some(font.preset_for(preset)));
             }
         }
     }
@@ -1587,7 +1633,8 @@ impl App {
             let source_w = (rest * 0.38).clamp(70.0, 220.0);
             let sound_w = rest - source_w - 16.0;
             egui::Grid::new("parts").num_columns(3).spacing([6.0, 6.0]).show(ui, |ui| {
-                for inst in Inst::ALL {
+                // the scores' extra parts only show when they play
+                for inst in Inst::ALL.into_iter().filter(|i| !i.score_only() || parts.contains(i)) {
                     let used = parts.contains(&inst);
                     let p = &mut self.params;
                     ui.add_enabled_ui(used, |ui| {
@@ -1641,7 +1688,7 @@ impl App {
                     ui.add_enabled_ui(used, |ui| {
                         if let (Some(f), Some(fp)) = (font, p.font(inst)) {
                             let mut pick = (fp.bank, fp.preset);
-                            if preset_combo(ui, ("preset", inst), f, &mut pick, sound_w) {
+                            if preset_combo(ui, ("preset", inst), f, inst, &mut pick, sound_w) {
                                 let preset = f.find(pick.0, pick.1).map(|x| f.preset_for(x));
                                 p.set_font(inst, preset);
                             }
@@ -1651,11 +1698,11 @@ impl App {
                         egui::ComboBox::from_id_salt(("sound", inst))
                             .width(sound_w)
                             .truncate()
-                            .selected_text(sound_name(current))
+                            .selected_text(part_sound_name(inst, current))
                             .height(420.0)
                             .show_ui(ui, |ui| {
                                 let mut family = "";
-                                for snd in SOUNDS {
+                                for snd in sounds_for(inst) {
                                     if snd.family != family {
                                         family = snd.family;
                                         ui.label(egui::RichText::new(family).small().weak());
@@ -1776,7 +1823,8 @@ impl App {
             .map(|i| PartInfo { inst: *i, color: inst_color(*i), sound: self.song.sound_name(*i) })
             .collect();
         ui.add_space(6.0);
-        self.mixer_view.show(ui, &mut self.params.mix, &parts, &self.meters);
+        let style_mix = self.params.style.suggested_mix().unwrap_or_default();
+        self.mixer_view.show(ui, &mut self.params.mix, &style_mix, &parts, &self.meters);
         ui.add_space(6.0);
     }
 
@@ -1963,21 +2011,39 @@ impl App {
             }
         }
 
-        // legend
+        // legend: each part and its sound, or just the parts when that's too
+        // long to fit beside the piece's details
+        let info = format!("{} · {} bpm · {}/{} · {} bars", song.params.title(), song.bpm, song.meter.0, song.meter.1, song.bars);
+        let info = painter.layout_no_wrap(info, tk.font(11.0), text_col);
+        let room = rect.width() - info.size().x - 24.0;
+        let legend = |full: bool| -> Vec<(Inst, bool, Arc<egui::Galley>)> {
+            song.parts
+                .iter()
+                .map(|&i| {
+                    let muted = song.params.muted.contains(&i);
+                    let sound = if full { format!(": {}", song.sound_name(i)) } else { String::new() };
+                    let label = format!("{}{sound}{}", i.role(), if muted { " (off)" } else { "" });
+                    let tc = if muted { text_col.gamma_multiply(0.5) } else { text_col };
+                    (i, muted, painter.layout_no_wrap(label, tk.font(11.0), tc))
+                })
+                .collect()
+        };
+        let width = |l: &[(Inst, bool, Arc<egui::Galley>)]| l.iter().map(|(_, _, g)| g.size().x + 28.0).sum::<f32>();
+        let mut items = legend(true);
+        if width(&items) > room {
+            items = legend(false);
+        }
         let mut lx = rect.left() + 6.0;
-        for i in song.parts.iter().copied() {
-            let muted = song.params.muted.contains(&i);
+        for (i, muted, g) in items {
             let col = if muted { inst_color(i).gamma_multiply(0.25) } else { inst_color(i) };
             painter.rect_filled(Rect::from_min_size(Pos2::new(lx, rect.bottom() - 13.0), Vec2::splat(9.0)), 2.0, col);
-            let label = format!("{}: {}{}", i.role(), song.sound_name(i), if muted { " (off)" } else { "" });
-            let tc = if muted { text_col.gamma_multiply(0.5) } else { text_col };
-            let g = painter.layout_no_wrap(label, tk.font(11.0), tc);
             let w = g.size().x;
             painter.galley(Pos2::new(lx + 13.0, rect.bottom() - 15.0), g, text_col);
             lx += w + 28.0;
         }
-        let info = format!("{} · {} bpm · {}/{} · {} bars", song.params.title(), song.bpm, song.meter.0, song.meter.1, song.bars);
-        painter.text(rect.right_bottom() - Vec2::new(6.0, 3.0), Align2::RIGHT_BOTTOM, info, tk.font(11.0), text_col);
+        if lx - 28.0 + 12.0 < rect.right() - info.size().x {
+            painter.galley(rect.right_bottom() - Vec2::new(6.0, 3.0) - info.size(), info, text_col);
+        }
 
         // playhead
         let playhead = self.player.as_ref().map(|p| song.secs_to_tick(p.position()).min(song.total_ticks));

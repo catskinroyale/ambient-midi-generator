@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+- Scores: pieces written as one arc (intro, build, peak and outro, scaled to the chosen length) for a full orchestra, listed under **Scores** in the Style menu. The first is **Tech Trailer**, a hybrid trailer score for technology and the future: a lone felt piano motif over a sub drone and glassy grains; a build of pulsing synth arpeggio, heartbeat kick, ticking percussion, low string ostinato, rising strings, brass swells, risers and braams; a peak of big drums, sub hits, braams, brass and choir that can double up in the final third; and a lone piano to close on a soft hit. The seed varies the motif, arpeggio, ostinato, drums, brass and chords. Choosing a score switches a major key to minor and sets up its effects and mix.
+- Three parts for the scores: Brass, Drums (on the General MIDI drum channel, with a choice of drum kit) and FX. They only show in Parts, the mixer and the assign dialog when the piece uses them.
+- Trailer Kit and Trailer FX presets in the Ambient Electronic SoundFont (16 in all): heartbeat and trailer kicks, taiko toms, snare, clap, ticks, hats and crash; a sub drone, 808-style sub booms, braams, risers, reversed cymbals, a whoosh, a downlifter, an impact and glassy grains, all synthesised. The built-in synth plays the same sounds.
+- Brass Section and Trombone sounds.
+
+### Changed
+- The mixer's **Reset** returns to the style's own mix, rather than always to plain channels.
+- The part legend under the piano roll shows only the parts' names when their sounds don't fit beside the piece's details.
+
 ## [0.5.0] - 2026-11-04
 
 ### Added

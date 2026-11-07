@@ -3,9 +3,10 @@
 //! of the box. `SoundFontSynth` wraps rustysynth for any General MIDI .sf2 file.
 
 use std::f32::consts::{PI, TAU};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::expression::VIBRATO_CENTS;
+use crate::kit::{self, FX_PROGRAM};
 use crate::reverb::Reverb;
 use crate::song::{Fx, Mix};
 
@@ -513,10 +514,95 @@ impl Wind {
 
 // ------------------------------------------------------------------ voices
 
+// ------------------------------------------------------------ the score kit
+
+/// The score kit's drums and effects, made at one sample rate.
+pub struct Kit {
+    drums: Vec<kit::Sound>,
+    effects: Vec<kit::Sound>,
+}
+
+impl Kit {
+    /// The kit at a sample rate, made once and shared.
+    pub fn shared(sr: u32) -> Arc<Kit> {
+        static KITS: Mutex<Vec<(u32, Arc<Kit>)>> = Mutex::new(Vec::new());
+        let mut kits = KITS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, k)) = kits.iter().find(|(r, _)| *r == sr) {
+            return k.clone();
+        }
+        // made while holding the lock, so it is only ever made once
+        let k = Arc::new(Kit { drums: kit::drums(sr as f64), effects: kit::effects(sr as f64) });
+        kits.push((sr, k.clone()));
+        k
+    }
+
+    fn find(&self, drums: bool, key: u8) -> Option<&kit::Sound> {
+        let list = if drums { &self.drums } else { &self.effects };
+        list.iter().find(|s| (s.keys.0..=s.keys.1).contains(&key))
+    }
+}
+
+/// A kit sound playing. One-shots play to the end whatever the note-off;
+/// the drone loops until it is let go.
+struct Sampled {
+    data: Arc<[f32]>,
+    pos: f64,
+    step: f64,
+    looped: Option<(usize, usize)>,
+    env: f32,
+    attack: f32,
+    release: f32,
+    released: bool,
+}
+
+impl Sampled {
+    fn new(sr: f32, sound: &kit::Sound, key: u8) -> Self {
+        let step = if sound.pitched() { 2f64.powf((key as f64 - sound.root as f64) / 12.0) } else { 1.0 };
+        let (attack, env) = if sound.looped.is_some() { (1.0 - (-1.0 / (0.6 * sr)).exp(), 0.0) } else { (1.0, 1.0) };
+        Sampled {
+            data: sound.data.clone(),
+            pos: 0.0,
+            step,
+            looped: sound.looped,
+            env,
+            attack,
+            release: decay_coef(2.5, sr),
+            released: false,
+        }
+    }
+
+    fn next(&mut self, ratio: f32) -> f32 {
+        let i = self.pos as usize;
+        if i + 1 >= self.data.len() {
+            self.env = 0.0;
+            return 0.0;
+        }
+        let f = (self.pos - i as f64) as f32;
+        let y = self.data[i] + (self.data[i + 1] - self.data[i]) * f;
+        self.pos += self.step * ratio as f64;
+        if let Some((a, b)) = self.looped {
+            if self.pos >= b as f64 {
+                self.pos -= (b - a) as f64;
+            }
+            if self.released {
+                self.env *= self.release;
+            } else {
+                self.env += (1.0 - self.env) * self.attack;
+            }
+        }
+        y * self.env
+    }
+
+    fn level(&self) -> f32 {
+        if self.pos as usize + 1 >= self.data.len() { 0.0 } else { self.env }
+    }
+}
+
 enum VoiceKind {
     Struck(Struck),
     Bowed(Bowed),
     Wind(Wind),
+    Sampled(Sampled),
 }
 
 struct Voice {
@@ -536,6 +622,7 @@ impl Voice {
             VoiceKind::Struck(s) => s.level(),
             VoiceKind::Bowed(b) => b.level(),
             VoiceKind::Wind(w) => w.level(),
+            VoiceKind::Sampled(s) => s.level(),
         }
     }
     fn release(&mut self) {
@@ -544,6 +631,7 @@ impl Voice {
             VoiceKind::Struck(s) => s.released = true,
             VoiceKind::Bowed(b) => b.released = true,
             VoiceKind::Wind(w) => w.released = true,
+            VoiceKind::Sampled(s) => s.released = true,
         }
     }
 }
@@ -590,6 +678,8 @@ pub struct BuiltinSynth {
     fx: Fx,
     /// Samples rendered, for the drift.
     clock: u64,
+    /// The score kit, made the first time a drum or effect plays.
+    kit: Option<Arc<Kit>>,
 }
 
 const MAX_VOICES: usize = 72;
@@ -614,6 +704,7 @@ impl BuiltinSynth {
             expr_coef: 1.0 - (-1.0 / (0.05 * sr)).exp(),
             fx: Fx::default(),
             clock: 0,
+            kit: None,
         }
     }
 
@@ -621,7 +712,37 @@ impl BuiltinSynth {
     pub fn dry(sample_rate: u32) -> Self {
         BuiltinSynth { reverb: None, ..BuiltinSynth::new(sample_rate) }
     }
+
+    /// With the score kit made now, so the first drum or effect doesn't
+    /// have to wait for it.
+    pub fn with_kit(mut self) -> Self {
+        self.kit = Some(Kit::shared(self.sr as u32));
+        self
+    }
+
+    /// A drum (on the drum channel) or trailer effect from the score kit.
+    fn play_kit(&mut self, ch: u8, key: u8, v: f32, drums: bool) {
+        let sr = self.sr;
+        let kit = self.kit.get_or_insert_with(|| Kit::shared(sr as u32)).clone();
+        let Some(sound) = kit.find(drums, key) else { return };
+        // the low and big sounds sit in the middle; the rest spread a little
+        let pan = if key < 48 || key == kit::fx::IMPACT { 0.0 } else { (hash01(key as u32 * 77) - 0.5) * 0.5 };
+        let angle = (pan + 1.0) * PI / 4.0;
+        self.voices.push(Voice {
+            ch,
+            key,
+            kind: VoiceKind::Sampled(Sampled::new(sr, sound, key)),
+            gain: KIT_GAIN * (0.08 + 0.92 * v * v),
+            pan_l: angle.cos(),
+            pan_r: angle.sin(),
+            age: self.counter,
+            released: false,
+        });
+    }
 }
+
+/// The kit's level against the other built-in sounds.
+const KIT_GAIN: f32 = 0.5;
 
 /// How quickly a bend glides to a new value, per drift block.
 fn bend_glide(sr: f32) -> f32 {
@@ -657,6 +778,10 @@ impl SynthEngine for BuiltinSynth {
         let seed = (self.counter as u32).wrapping_mul(31) ^ key as u32;
         let v = vel as f32 / 127.0;
         let program = self.channels[ch as usize].program;
+        let drums = ch == 9;
+        if drums || program == FX_PROGRAM {
+            return self.play_kit(ch, key, v, drums);
+        }
         let (sr, v) = (self.sr, v);
         // each note lands a little off pitch, and ensemble sounds spread wider
         let cents = (hash01(seed ^ 0x5bd1) - 0.5) * 2.0 * self.fx.detune * 6.0;
@@ -778,6 +903,7 @@ impl SynthEngine for BuiltinSynth {
                     VoiceKind::Struck(x) => x.next(table, ratio),
                     VoiceKind::Bowed(x) => x.next(table, ratio),
                     VoiceKind::Wind(x) => x.next(table, ratio),
+                    VoiceKind::Sampled(x) => x.next(ratio),
                 } * v.gain
                     * ch.volume
                     * ch.expr;
@@ -798,7 +924,9 @@ impl SynthEngine for BuiltinSynth {
                 }
             }
         }
-        self.voices.retain(|v| !(v.released || matches!(v.kind, VoiceKind::Struck(_))) || v.level() > 2e-4);
+        self.voices.retain(|v| {
+            !(v.released || matches!(v.kind, VoiceKind::Struck(_) | VoiceKind::Sampled(_))) || v.level() > 2e-4
+        });
     }
 
     fn set_fx(&mut self, fx: &Fx) {
@@ -969,7 +1097,8 @@ mod tests {
     #[test]
     fn every_sound_renders() {
         let sr = 44100;
-        for snd in SOUNDS {
+        // the trailer effects are tested with the kit
+        for snd in SOUNDS.iter().filter(|s| s.program != FX_PROGRAM) {
             let mut peaks = Vec::new();
             for key in [40u8, 64, 84] {
                 let mut s = BuiltinSynth::new(sr);
@@ -992,6 +1121,33 @@ mod tests {
             }
             println!("{:<18} peaks {:.2} {:.2} {:.2}", snd.name, peaks[0], peaks[1], peaks[2]);
             assert!(peaks.iter().all(|p| *p > 0.03 && *p < 0.95), "{} level out of range: {peaks:?}", snd.name);
+        }
+    }
+
+    /// Every drum and trailer effect plays, at a level near the other sounds.
+    #[test]
+    fn the_kit_plays() {
+        let sr = 44100;
+        let kit = Kit::shared(sr);
+        let sounds = kit.drums.iter().map(|s| (9, 0, s)).chain(kit.effects.iter().map(|s| (6, FX_PROGRAM, s)));
+        for (ch, program, sound) in sounds {
+            let mut s = BuiltinSynth::new(sr);
+            s.program(ch, program);
+            s.control(ch, 91, 0);
+            let key = sound.keys.0 + (sound.keys.1 - sound.keys.0) / 2;
+            s.note_on(ch, key, 100);
+            let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+            let mut peak = 0.0f32;
+            for block in 0..(sr as usize * 14 / 512) {
+                if block == sr as usize * 3 / 512 {
+                    s.note_off(ch, key);
+                }
+                s.render(&mut l, &mut r);
+                peak = l.iter().chain(r.iter()).fold(peak, |m, x| m.max(x.abs()));
+            }
+            println!("{:<20} key {key}: peak {peak:.2}", sound.name);
+            assert!(peak > 0.05 && peak < 0.99, "{} level out of range: {peak}", sound.name);
+            assert!(s.voices.is_empty(), "{} is still playing", sound.name);
         }
     }
 

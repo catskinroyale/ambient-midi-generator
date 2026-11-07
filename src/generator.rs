@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::kit::{self, drum, fx};
 use crate::rng::Rng;
 use crate::song::{Ctrl, Inst, LengthMode, Note, Params, Song, Style};
 use crate::theory::{Chord, Ext, Scale, voice_lead};
@@ -134,6 +135,7 @@ pub fn generate(p: &Params) -> Song {
         Style::Gamelan => ctx.gamelan(),
         Style::Fingerstyle => ctx.fingerstyle(),
         Style::NeonNoir => ctx.neon_noir(),
+        Style::TechTrailer => ctx.tech_trailer(),
     }
     ctx.arrange(secs_per_bar);
 
@@ -2918,8 +2920,446 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    // ------------------------------------------------------------------ scores
+
+    /// Tech Trailer: a hybrid trailer score in one arc. A sparse, glassy intro
+    /// (a felt piano motif over a sub drone and grains); a build that layers a
+    /// synth arpeggio, a heartbeat kick, ticking percussion, a low string
+    /// ostinato, rising strings, brass swells, risers and braams; a peak of big
+    /// drums, sub hits, braams, brass and choir, doubling up in the final
+    /// third; and an outro back to the piano, ending on a soft hit.
+    fn tech_trailer(&mut self) {
+        let beat = self.ppq;
+        let bar = self.bar;
+        let s16 = beat / 4;
+        let n = self.bars;
+        let ticks = |secs: f64| (secs * self.p.tempo.clamp(30.0, 200.0) as f64 / 60.0 * beat as f64) as u32;
+
+        // The arc: intro, build (whose second half adds the heavier layers),
+        // peak and outro, on whole pairs of bars.
+        let even = |x: f64| ((n as f64 * x) as u32 / 2 * 2).max(2);
+        let outro = ((n as f64 * 0.88) as u32).clamp(1, n.saturating_sub(2).max(1));
+        let peak = even(0.6).min(outro.saturating_sub(2)).max(1);
+        let intro = even(0.2).min(peak.saturating_sub(4)).max(1).min(peak);
+        let mid = intro + (peak - intro) / 4 * 2;
+        // the last bar of the build holds its breath before the peak
+        let drop = if peak - intro >= 4 { peak - 1 } else { peak };
+        // the drums can double up in the final third
+        let double = (self.variant("double", 4) != 3).then(|| (n * 2 / 3).max(peak + (outro - peak) / 2));
+
+        self.intensity = (0..n)
+            .map(|b| {
+                let x = |a: u32, z: u32| (b - a) as f64 / (z - a).max(1) as f64;
+                if b < intro {
+                    0.15 + 0.1 * x(0, intro)
+                } else if b < peak {
+                    0.3 + 0.55 * x(intro, peak)
+                } else if b < outro {
+                    0.9 + 0.1 * x(peak, outro)
+                } else {
+                    0.3 - 0.25 * x(outro, n)
+                }
+            })
+            .collect();
+        // how far into the build, 0..1
+        let rise = |b: u32| ((b.max(intro) - intro) as f64 / (peak - intro).max(1) as f64).min(1.0);
+
+        // Harmony: simple, open chords, two bars each. The intro and build
+        // turn one progression over; the peak lifts to another; the outro
+        // rests on the tonic.
+        let mut rng = self.rng("score-harmony");
+        let (verse, lift): (&[&[i32]], &[&[i32]]) = if self.p.mode.is_minor() {
+            (&[&[0, 5, 2, 6], &[0, 5, 3, 6], &[0, 2, 5, 6], &[0, 6, 5, 6]], &[&[5, 6, 0, 0], &[5, 6, 2, 2], &[3, 5, 2, 6], &[5, 2, 6, 6]])
+        } else {
+            (&[&[5, 3, 0, 4], &[0, 4, 5, 3], &[0, 5, 3, 4], &[5, 4, 3, 4]], &[&[3, 4, 0, 0], &[3, 4, 5, 5], &[5, 3, 0, 4], &[3, 0, 4, 4]])
+        };
+        let exts = [Ext::Triad, Ext::Add9, Ext::Sus2, Ext::Sus4];
+        let prog = |rng: &mut Rng, pool: &[&[i32]]| -> Vec<Chord> {
+            let degs = *rng.pick(pool);
+            degs.iter().map(|d| Chord::new(self.fix_dim(*d), exts[rng.weighted(&[0.35, 0.3, 0.2, 0.15])])).collect()
+        };
+        let verse = prog(&mut rng, verse);
+        let lift = prog(&mut rng, lift);
+        let home = Chord::new(0, *rng.pick(&[Ext::Add9, Ext::Sus2, Ext::Triad]));
+        self.harmony = (0..n)
+            .map(|b| {
+                if b >= outro {
+                    home.clone()
+                } else if b >= peak {
+                    lift[((b - peak) / 2 % 4) as usize].clone()
+                } else {
+                    verse[(b / 2 % 4) as usize].clone()
+                }
+            })
+            .collect();
+        self.section = (0..n).map(|b| [intro, peak, outro].iter().filter(|s| b >= **s).count() as u8).collect();
+
+        let motif_kind = self.variant("motif", 3);
+        let arp_kind = self.variant("arp", 3);
+        let ostinato = self.variant("ostinato", 3);
+        let taiko = self.variant("drums", 2) == 0;
+        let horns = self.variant("brass", 2) == 0;
+
+        // ---- the piano motif: a few chord tones in a fixed order, the same
+        // figure over every chord
+        let mut mrng = self.rng("motif");
+        let len = if motif_kind == 2 { 3 } else { 4 };
+        let cell: Vec<usize> = (0..len).map(|_| mrng.range(0, 4) as usize).collect();
+        let onsets: &[u32] = match motif_kind {
+            0 => &[0, 2, 4, 6, 8, 10, 12, 14],
+            1 => &[0, 3, 6, 8, 11, 14],
+            _ => &[0, 3, 8, 11],
+        };
+        let e8 = beat / 2;
+        for b in (0..n.saturating_sub(2)).step_by(2) {
+            let in_outro = b >= outro;
+            if (b >= drop && b < peak) || (in_outro && b >= outro + 2) {
+                continue;
+            }
+            let chord = self.harmony[b as usize].clone();
+            let root = if chord.root > 3 { chord.root - 7 } else { chord.root };
+            let third = if chord.ext == Ext::Sus2 { 1 } else if chord.ext == Ext::Sus4 { 3 } else { 2 };
+            let tones = [root, root + third, root + 4, root + 7, root + 8];
+            let it = self.it(b);
+            for (i, on) in onsets.iter().enumerate() {
+                let start = b * bar + on * e8;
+                if b < peak && start >= drop * bar {
+                    break;
+                }
+                // the intro starts with half the figure; the outro thins it out
+                if (b == 0 && i >= onsets.len() / 2 && motif_kind != 2) || (in_outro && mrng.chance(0.4)) {
+                    continue;
+                }
+                let deg = tones[cell[i % len]];
+                let key = self.scale.midi(deg);
+                let next = onsets.get(i + 1).map_or(16, |o| *o);
+                let dur = (next - on) * e8 + beat;
+                let vel = if b < peak { 40.0 + 16.0 * rise(b) } else if in_outro { 38.0 } else { 52.0 } + if i == 0 { 6.0 } else { 0.0 };
+                self.note(Inst::Piano, start, dur.max(2 * beat), key, vel + mrng.gauss() * 2.0);
+                if (peak..outro).contains(&b) {
+                    self.note(Inst::Piano, start, dur.max(2 * beat), key + 12, vel - 10.0 + it);
+                }
+            }
+        }
+        // The close: the figure's first note alone on each bar, then one low
+        // piano note left ringing, and a soft final hit.
+        let last = n - 1;
+        let tonic = self.scale.midi(0);
+        let lone = self.scale.midi([0, 2, 4, 7, 8][cell[0]]);
+        for b in (outro + 2)..last.saturating_sub(1) {
+            let fade = (b - outro) as f64 / (n - outro) as f64;
+            self.note(Inst::Piano, b * bar, 2 * bar, lone, 40.0 - 10.0 * fade);
+        }
+        self.note(Inst::Piano, last.saturating_sub(1) * bar, 3 * bar, tonic - 12, 40.0);
+        self.note(Inst::Piano, last.saturating_sub(1) * bar, 3 * bar, tonic, 34.0);
+        let pc = |key: i32| key.rem_euclid(12);
+        let tonic_pc = pc(tonic);
+        self.note(Inst::Fx, last * bar, ticks(6.0), (fx::IMPACT) as i32, 52.0);
+        self.note(Inst::Fx, last * bar, ticks(3.5), fx::BOOM as i32 + tonic_pc, 56.0);
+
+        // ---- the sub drone and glassy grains
+        let drone_key = fx::DRONE as i32 + tonic_pc;
+        self.note(Inst::Fx, 0, drop * bar, drone_key, 62.0);
+        self.note(Inst::Fx, outro * bar, (n - outro) * bar + bar, drone_key, 52.0);
+        for b in (0..n).step_by(4) {
+            if b < mid || b == outro {
+                let root = pc(self.scale.midi(self.harmony[b as usize].root));
+                self.note(Inst::Fx, b * bar, 4 * bar, fx::GRAINS as i32 + root, 56.0 + 10.0 * self.it(b));
+            }
+        }
+
+        // ---- strings: the pad rises through the build, soars at the peak and
+        // fades away in the outro
+        let pad_from = intro + (peak - intro) / 4;
+        let mut prev = Vec::new();
+        for b in (pad_from..outro).step_by(2) {
+            let chord = self.harmony[b as usize].clone();
+            let start = b * bar;
+            let span = 2.min(outro - b) * bar;
+            let (lo, hi, spread) = if b < peak {
+                let lo = 48 + (10.0 * rise(b)).round() as i32;
+                (lo, lo + 19, false)
+            } else {
+                (52, 86, true)
+            };
+            let voicing = voice_lead(&chord.pitch_classes(&self.scale), &prev, lo, hi, spread);
+            prev = voicing.clone();
+            let t = rise(b);
+            let vel = if b < peak { 40.0 + 20.0 * t } else { 56.0 };
+            for k in &voicing {
+                self.note(Inst::StringPad, start, span + s16, *k, vel);
+            }
+            if b >= peak && voicing.last().is_some_and(|k| k + 12 <= 96) {
+                self.note(Inst::StringPad, start, span + s16, voicing.last().unwrap() + 12, vel - 12.0);
+            }
+            if b + 2 >= peak && b < peak {
+                // the last chord of the build swells into the hit
+                self.swell(Inst::StringPad, start, span, 50.0, 90.0, 115.0);
+            } else if b < peak {
+                self.swell(Inst::StringPad, start, span, 30.0 + 35.0 * t, 70.0 + 35.0 * t, 50.0 + 35.0 * t);
+            } else {
+                self.swell(Inst::StringPad, start, span, 80.0, 105.0, 90.0);
+            }
+        }
+        {
+            let voicing = voice_lead(&home.pitch_classes(&self.scale), &prev, 48, 72, false);
+            let start = outro * bar;
+            let span = (n - outro) * bar;
+            for k in &voicing {
+                self.note(Inst::StringPad, start, span, *k, 56.0);
+            }
+            self.swell(Inst::StringPad, start, span, 80.0, 70.0, 0.0);
+        }
+
+        // ---- the synth arpeggio, pulsing in sixteenths through the build and peak
+        for b in intro..outro {
+            if b >= drop && b < peak {
+                continue;
+            }
+            let chord = self.harmony[b as usize].clone();
+            let base = self.bass_key(&chord, 45);
+            let r = self.scale.degree_near(base);
+            let third = if chord.ext == Ext::Sus2 { 1 } else if chord.ext == Ext::Sus4 { 3 } else { 2 };
+            let tones = [base, self.scale.midi(r + third), self.scale.midi(r + 4), base + 12];
+            let order: &[usize] = match arp_kind {
+                0 => &[0, 1, 2, 3],
+                1 => &[0, 1, 2, 3, 2, 1],
+                _ => &[0, 0, 3, 0, 2, 0, 3, 0],
+            };
+            let vel = if b < peak { 36.0 + 30.0 * rise(b) } else { 64.0 };
+            for i in 0..16u32 {
+                let key = tones[order[i as usize % order.len()]];
+                let accent = if i % 4 == 0 { 8.0 } else { 0.0 };
+                self.note(Inst::Pizzicato, b * bar + i * s16, s16 * 9 / 10, key, vel + accent);
+            }
+        }
+
+        // ---- the low string ostinato, from the middle of the build
+        for b in mid..outro {
+            if b >= drop && b < peak {
+                continue;
+            }
+            let chord = self.harmony[b as usize].clone();
+            let root = self.bass_key(&chord, 36);
+            let (steps, octave_at): (&[u32], &[u32]) = match ostinato {
+                0 => (&[0, 2, 4, 6, 8, 10, 12, 14], &[4, 12]),
+                1 => (&[0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15], &[8]),
+                _ => (&[0, 3, 6, 8, 11, 14], &[6, 14]),
+            };
+            let vel = if b < peak { 48.0 + 24.0 * rise(b) } else { 70.0 };
+            for s in steps {
+                let key = if octave_at.contains(s) { root + 12 } else { root };
+                let accent = if s % 4 == 0 { 10.0 } else { 0.0 };
+                let start = b * bar + s * s16;
+                self.note(Inst::Cello, start, s16 * 8 / 5, key, vel + accent);
+                if b >= peak && key - 12 >= 28 {
+                    self.note(Inst::Cello, start, s16 * 8 / 5, key - 12, vel + accent - 8.0);
+                }
+            }
+        }
+
+        // ---- brass: swells through the second half of the build, then full
+        // at the peak
+        for b in (mid..outro).step_by(2) {
+            let chord = self.harmony[b as usize].clone();
+            let start = b * bar;
+            let span = 2.min(outro - b) * bar;
+            let root = self.bass_key(&chord, 43);
+            let fifth = self.scale.midi(self.scale.degree_near(root) + 4);
+            let keys: Vec<i32> = if b >= peak && !horns {
+                voice_lead(&chord.pitch_classes(&self.scale), &[], 48, 67, false)
+            } else if b >= peak {
+                vec![root, fifth, root + 12]
+            } else {
+                vec![root, fifth]
+            };
+            let vel = if b < peak { 60.0 + 20.0 * rise(b) } else { 80.0 };
+            for k in &keys {
+                self.note(Inst::Brass, start, span + s16, *k, vel);
+            }
+            if b + 2 >= peak && b < peak {
+                self.swell(Inst::Brass, start, span, 20.0, 80.0, 127.0);
+            } else if b < peak {
+                self.swell(Inst::Brass, start, span, 15.0, 55.0 + 50.0 * rise(b), 25.0);
+            } else {
+                self.swell(Inst::Brass, start, span, 70.0, 120.0, 95.0);
+            }
+        }
+
+        // ---- the choir, high above the peak (entering softly just before it)
+        let mut prev = Vec::new();
+        for b in (peak.saturating_sub(4).max(mid)..outro).step_by(2) {
+            if b >= drop && b < peak {
+                continue;
+            }
+            let chord = self.harmony[b as usize].clone();
+            let voicing = voice_lead(&chord.pitch_classes(&self.scale), &prev, 67, 86, false);
+            prev = voicing.clone();
+            let start = b * bar;
+            let span = if b < peak { (drop - b).min(2) } else { 2.min(outro - b) } * bar;
+            for k in &voicing {
+                self.note(Inst::Violin, start, span + s16, *k, if b < peak { 50.0 } else { 66.0 });
+            }
+            if b < peak {
+                self.swell(Inst::Violin, start, span, 15.0, 55.0, 60.0);
+            } else {
+                self.swell(Inst::Violin, start, span, 70.0, 115.0, 90.0);
+            }
+        }
+
+        // ---- drums
+        let mut drng = self.rng("score-drums");
+        let tick_from = intro + (peak - intro) / 4;
+        for b in intro..outro {
+            let bs = b * bar;
+            let t = rise(b);
+            if b >= drop && b < peak {
+                continue;
+            }
+            if b < peak {
+                // the heartbeat, joined by beat three halfway through
+                let beats: &[u32] = if b >= mid { &[0, 2] } else { &[0] };
+                for at in beats {
+                    let v = 66.0 + 30.0 * t;
+                    self.note(Inst::Drums, bs + at * beat, beat / 2, drum::HEARTBEAT as i32, v);
+                    self.note(Inst::Drums, bs + at * beat + beat * 3 / 8, beat / 2, drum::HEARTBEAT as i32, v * 0.7);
+                }
+                if b >= tick_from {
+                    for i in 0..16u32 {
+                        let v = [1.0, 0.45, 0.7, 0.45][i as usize % 4] * (30.0 + 30.0 * t);
+                        self.note(Inst::Drums, bs + i * s16, s16, drum::HAT as i32, v + drng.gauss() * 2.0);
+                    }
+                    for at in [6, 14] {
+                        self.note(Inst::Drums, bs + at * s16, s16, drum::TICK as i32, 40.0 + 25.0 * t);
+                    }
+                }
+                // the toms gather in the two bars before the breath
+                if drop >= 2 && b + 2 >= drop && b >= mid {
+                    let roll = b + 1 == drop;
+                    let step = if roll { s16 } else { beat / 2 };
+                    let count = bar / step;
+                    for i in 0..count {
+                        let x = (i as f64 + if roll { count as f64 } else { 0.0 }) / (2 * count) as f64;
+                        let k = if i % 2 == 0 { drum::TOM_LOW } else { drum::TOM_MID };
+                        self.note(Inst::Drums, bs + i * step, step, k as i32, 55.0 + 60.0 * x);
+                        if roll {
+                            self.note(Inst::Drums, bs + i * step, step, drum::SNARE as i32, 30.0 + 70.0 * x);
+                        }
+                    }
+                }
+                continue;
+            }
+            // the peak: half time, then doubling up
+            let doubled = double.is_some_and(|d| b >= d);
+            let fill = b + 1 == outro;
+            let crash_every = if doubled { 2 } else { 4 };
+            if (b - peak) % crash_every == 0 {
+                self.note(Inst::Drums, bs, 2 * bar, drum::CRASH as i32, 84.0);
+            }
+            if fill {
+                for i in 0..16u32 {
+                    let k = [drum::TOM_HIGH, drum::TOM_MID, drum::TOM_LOW, drum::TOM_LOW][(i / 4) as usize];
+                    self.note(Inst::Drums, bs + i * s16, s16, k as i32, 68.0 + 2.0 * i as f64);
+                    if i % 2 == 0 {
+                        self.note(Inst::Drums, bs + i * s16, s16, drum::SNARE as i32, 50.0 + 2.5 * i as f64);
+                    }
+                }
+                continue;
+            }
+            let e = beat / 2;
+            if doubled {
+                for at in [0, 3, 4] {
+                    self.note(Inst::Drums, bs + at * e, e, drum::KICK as i32, if at == 3 { 74.0 } else { 94.0 });
+                }
+                for at in [2, 6] {
+                    self.note(Inst::Drums, bs + at * e, e, drum::SNARE as i32, 90.0);
+                    self.note(Inst::Drums, bs + at * e, e, drum::CLAP as i32, 76.0);
+                }
+                for i in 0..8u32 {
+                    let k = if i % 2 == 0 { drum::TOM_LOW } else { drum::TOM_MID };
+                    let accent = if i % 2 == 0 { 15.0 } else { 0.0 };
+                    self.note(Inst::Drums, bs + i * e, e, k as i32, 66.0 + accent);
+                }
+                for i in 0..16u32 {
+                    self.note(Inst::Drums, bs + i * s16, s16, drum::HAT as i32, if i % 2 == 0 { 50.0 } else { 32.0 });
+                }
+            } else {
+                self.note(Inst::Drums, bs, e, drum::KICK as i32, 96.0);
+                if (b - peak) % 2 == 1 {
+                    self.note(Inst::Drums, bs + 5 * e, e, drum::KICK as i32, 72.0);
+                }
+                self.note(Inst::Drums, bs + 4 * e, e, drum::SNARE as i32, 92.0);
+                self.note(Inst::Drums, bs + 4 * e, e, drum::CLAP as i32, 78.0);
+                if taiko {
+                    for (at, k, v) in [(0, drum::TOM_LOW, 88.0), (3, drum::TOM_MID, 74.0), (6, drum::TOM_LOW, 80.0), (7, drum::TOM_HIGH, 70.0)] {
+                        self.note(Inst::Drums, bs + at * e, e, k as i32, v);
+                    }
+                } else if (b - peak) % 4 == 3 {
+                    for i in 8..16u32 {
+                        let k = if i < 12 { drum::TOM_MID } else { drum::TOM_LOW };
+                        self.note(Inst::Drums, bs + i * s16, s16, k as i32, 60.0 + 3.0 * (i - 8) as f64);
+                    }
+                }
+                for i in 0..8u32 {
+                    self.note(Inst::Drums, bs + i * e, e, drum::HAT as i32, if i % 2 == 0 { 44.0 } else { 30.0 });
+                }
+            }
+        }
+
+        // ---- trailer effects
+        let fx_at = |s: &mut Self, end_bar: u32, key: u8, secs: f64, vel: f64| {
+            let end = end_bar * bar;
+            let len = ticks(secs);
+            s.note(Inst::Fx, end.saturating_sub(len), len, key as i32, vel);
+        };
+        // into the build, its second half, and the peak
+        fx_at(self, intro, fx::REVERSE_LONG, kit::REVERSE_LONG_SECS, 70.0);
+        if mid > intro {
+            fx_at(self, mid, fx::RISER, kit::RISER_SECS, 72.0);
+            fx_at(self, mid, fx::REVERSE, kit::REVERSE_SECS, 76.0);
+        }
+        fx_at(self, peak, fx::RISER_LONG, kit::RISER_LONG_SECS, 96.0);
+        fx_at(self, peak, fx::REVERSE_LONG, kit::REVERSE_LONG_SECS, 92.0);
+        // a whoosh as the pads come in, and across the peak's eight-bar lines
+        let whoosh = ticks(kit::WHOOSH_PEAK_SECS);
+        for b in std::iter::once(pad_from).chain((peak + 8..outro).step_by(8)) {
+            if b > 0 {
+                self.note(Inst::Fx, (b * bar).saturating_sub(whoosh), ticks(2.2), fx::WHOOSH as i32, 70.0);
+            }
+        }
+        // braams and sub booms on the chord's root: now and then in the
+        // build, then hammering the peak
+        let root_pc = |s: &Self, b: u32| pc(s.scale.midi(s.harmony[b as usize].root));
+        for b in mid..outro {
+            if b >= drop && b < peak {
+                continue;
+            }
+            let r = root_pc(self, b);
+            let bs = b * bar;
+            let braam = if b < peak { (b - mid) % 8 == 0 } else { (b - peak) % 4 == 0 };
+            if braam {
+                let v = if b == peak { 104.0 } else if b < peak { 76.0 } else { 88.0 };
+                self.note(Inst::Fx, bs, ticks(5.0), fx::BRAAM as i32 + r, v);
+            }
+            let doubled = double.is_some_and(|d| b >= d);
+            let boom = if b < peak { braam } else { doubled || (b - peak) % 2 == 0 };
+            if boom {
+                self.note(Inst::Fx, bs, ticks(3.0), fx::BOOM as i32 + r, if b < peak { 72.0 } else { 90.0 });
+            }
+            if b >= peak && b > peak && (b - peak) % 4 == 0 {
+                fx_at(self, b, fx::REVERSE, kit::REVERSE_SECS, 70.0);
+            }
+        }
+        self.note(Inst::Fx, peak * bar, ticks(6.0), fx::IMPACT as i32, 100.0);
+        if outro < n {
+            self.note(Inst::Fx, outro * bar, ticks(3.0), fx::DOWNLIFTER as i32, 82.0);
+            self.note(Inst::Fx, outro * bar, ticks(6.0), fx::IMPACT as i32, 80.0);
+        }
+    }
+
     fn arrange(&mut self, secs_per_bar: f64) {
-        if self.p.version < 2 {
+        // a score is arranged as it is written
+        if self.p.version < 2 || self.p.style.is_score() {
             return;
         }
         let mut rng = self.rng("arrange");
@@ -3171,6 +3611,42 @@ mod tests {
         assert_eq!(p, Params::default());
     }
 
+    /// The trailer score keeps to its arc: a sparse intro of piano and
+    /// effects, drums only from the build, the big hit at the peak, and a quiet
+    /// close on a soft hit.
+    #[test]
+    fn the_trailer_has_its_arc() {
+        use crate::kit::{drum, fx};
+        for seed in 1..9u64 {
+            let p = Params { style: Style::TechTrailer, seed, tempo: 80.0, ..Params::default() };
+            let s = generate(&p);
+            let bar = s.bar_ticks();
+            let parts_in = |a: u32, b: u32| -> Vec<Inst> {
+                let mut v: Vec<Inst> = s.notes.iter().filter(|n| n.start >= a * bar && n.start < b * bar).map(|n| n.inst).collect();
+                v.sort();
+                v.dedup();
+                v
+            };
+            assert_eq!(parts_in(0, 8), vec![Inst::Piano, Inst::Fx], "seed {seed}: the intro is piano and effects");
+            assert_eq!(s.parts.len(), Inst::ALL.len(), "seed {seed}: every part plays");
+            // one big impact at the peak, and a soft one to end
+            let impacts: Vec<&Note> = s.notes.iter().filter(|n| n.inst == Inst::Fx && n.key == fx::IMPACT).collect();
+            assert_eq!(impacts.len(), 3, "seed {seed}");
+            // the bar a note is played on, allowing for humanising
+            let at = |n: &Note| (n.start + 40) / bar;
+            let peak = at(impacts[0]);
+            assert!(impacts[0].vel > impacts[2].vel);
+            assert_eq!(at(impacts[2]), s.bars - 1);
+            // the bar before the peak holds its breath, and the peak hits hard
+            assert!(!s.notes.iter().any(|n| n.inst == Inst::Drums && at(n) == peak - 1), "seed {seed}");
+            assert!(s.notes.iter().any(|n| n.inst == Inst::Fx && (fx::BRAAM..fx::BRAAM + 12).contains(&n.key) && at(n) == peak));
+            assert!(s.notes.iter().any(|n| n.inst == Inst::Drums && n.key == drum::KICK && at(n) == peak));
+            // the long riser ends on the hit
+            let riser = s.notes.iter().find(|n| n.key == fx::RISER_LONG && n.inst == Inst::Fx).unwrap();
+            assert!(riser.end().abs_diff(peak * bar) < bar / 8, "seed {seed}");
+        }
+    }
+
     #[test]
     fn all_instrumentations_work() {
         for style in Style::ALL {
@@ -3178,6 +3654,10 @@ mod tests {
                 let p = Params { style, instrumentation: inst, ..Params::default() };
                 let s = generate(&p);
                 assert!(!s.notes.is_empty());
+                // a score always plays its whole orchestra
+                if style.is_score() {
+                    continue;
+                }
                 if inst == Instrumentation::Piano {
                     assert!(s.notes.iter().all(|n| n.inst == Inst::Piano), "{style:?}");
                 }
@@ -3198,7 +3678,9 @@ mod tests {
             let mut notes = 0;
             for seed in 1..6u64 {
                 for inst in [Instrumentation::Piano, Instrumentation::Strings, Instrumentation::PianoAndStrings] {
-                    let s = generate(&Params { style, seed, instrumentation: inst, ..Params::default() });
+                    let mut s = generate(&Params { style, seed, instrumentation: inst, ..Params::default() });
+                    // the drums and effects keys aren't pitches
+                    s.notes.retain(|n| !matches!(n.inst, Inst::Drums | Inst::Fx));
                     notes += s.notes.len();
                     for n in &s.notes {
                         keys = (keys.0.min(n.key), keys.1.max(n.key));
