@@ -18,7 +18,7 @@ use crate::mixer::{Meters, Mixer};
 use crate::mixer_ui::{MixerView, PartInfo};
 use crate::player::{Cmd, Player, Timeline, render_wav};
 use crate::rng::Rng;
-use crate::slideshow::{self, Fit, Grid, Plan, Slideshow};
+use crate::slideshow::{self, Accents, Fit, Grid, Plan, Slideshow};
 use crate::song::{
     ELECTRONIC_FONT, EchoTime, Expr, Fx, Inst, Instrumentation, Interval, LengthMode, Mix, Note, Params, Song,
     Sounds, Space, Style, Tuning, part_sound_name, sounds_for,
@@ -62,6 +62,12 @@ pub struct App {
     show_controls: bool,
     /// Fitting a photo slideshow to the music.
     slideshow: Slideshow,
+    /// Where the song marks a moment, for placing the image changes.
+    accents: Accents,
+    /// The plan last worked out, and the settings and song it was for.
+    slide_cache: std::cell::RefCell<Option<(Slideshow, u64, Plan)>>,
+    /// Counts the songs generated, to tell when the plan is out of date.
+    song_rev: u64,
     /// A new seed or style picks the parts' sounds from the style's palette.
     vary_sounds: bool,
     /// The style and seed the sounds were last picked for.
@@ -235,6 +241,7 @@ impl App {
         cc.egui_ctx.set_theme(theme);
         let params = Params::default();
         let song = generate(&params);
+        let accents = Accents::of(&song);
         let timeline = Arc::new(Timeline::from_song(&song));
         let (player, audio_error) =
             match Player::new(|sr| Box::new(BuiltinSynth::new(sr)) as Box<dyn SynthEngine>) {
@@ -267,6 +274,9 @@ impl App {
             theme,
             show_controls: true,
             slideshow,
+            accents,
+            slide_cache: Default::default(),
+            song_rev: 0,
             vary_sounds,
             sounds_for: (Style::EtherealPads, 0),
             about: About::default(),
@@ -342,7 +352,7 @@ impl App {
             app.status = format!("Loaded {} SoundFonts", app.fonts.len());
         }
         let snap_style = app.snapshot.as_ref().and_then(|s| {
-            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir), ("trailer", Style::TechTrailer), ("rain", Style::MegacityRain), ("stars", Style::StarCathedral)]
+            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir), ("trailer", Style::TechTrailer), ("rain", Style::MegacityRain), ("stars", Style::StarCathedral), ("glide", Style::NeonGlide)]
                 .into_iter()
                 .find(|(o, _)| s.wants(o))
                 .map(|(_, st)| st)
@@ -379,6 +389,8 @@ impl App {
         // only notes edited: playback carries on without a break
         let edits_only = Params { edits: self.params.edits.clone(), ..self.generated_from.clone() }.same_music(&self.params);
         self.song = generate(&self.params);
+        self.accents = Accents::of(&self.song);
+        self.song_rev += 1;
         self.timeline = Arc::new(Timeline::from_song(&self.song));
         self.generated_from = self.params.clone();
         self.recipe_text = self.params.to_recipe();
@@ -1180,8 +1192,24 @@ impl App {
     }
 
     /// Where a slideshow's images fall: in the generated track, or in the track
-    /// the images need.
+    /// the images need; on the music's accents if they follow it.
     fn slide_plan(&self) -> Plan {
+        let mut cache = self.slide_cache.borrow_mut();
+        if let Some((s, rev, plan)) = cache.as_ref() {
+            if *s == self.slideshow && *rev == self.song_rev {
+                return plan.clone();
+            }
+        }
+        let mut plan = self.even_plan();
+        if self.slideshow.follow_music {
+            plan = plan.follow(&self.slideshow, &self.accents);
+        }
+        *cache = Some((self.slideshow.clone(), self.song_rev, plan.clone()));
+        plan
+    }
+
+    /// The images on an even count, which also sets the track's length.
+    fn even_plan(&self) -> Plan {
         match self.slideshow.fit {
             Fit::ImagesToTrack => {
                 Plan::for_track(&self.slideshow, Grid::new(self.song.bpm, self.song.meter), self.song.duration_secs())
@@ -1199,7 +1227,7 @@ impl App {
             return;
         }
         // the generator adds the final ring-out bar itself
-        let bars = self.slide_plan().bars().saturating_sub(1).max(4);
+        let bars = self.even_plan().bars().saturating_sub(1).max(4);
         if self.params.length_mode != LengthMode::Bars || self.params.target_bars != bars {
             self.params.length_mode = LengthMode::Bars;
             self.params.target_bars = bars;
@@ -1347,6 +1375,7 @@ impl App {
         let mut copy = false;
         let mut save = false;
         let mut show = s.show_on_timeline;
+        let mut follow = s.follow_music;
         widgets::inset(ui, |ui| {
             let headline = match s.fit {
                 Fit::ImagesToTrack => format!("{} images", plan.images),
@@ -1354,19 +1383,22 @@ impl App {
             };
             ui.label(egui::RichText::new(headline).font(t.semibold(20.0)).color(t.text));
             ui.add_space(2.0);
-            let fade = (s.fade as f64).min(plan.slot.secs / 2.0);
+            let (short, long) = if plan.images > 0 { plan.holds() } else { (plan.slot.secs, plan.slot.secs) };
+            let fade = (s.fade as f64).min(short / 2.0);
             let bar = plan.grid.bar();
             let bars = |secs: f64| {
                 let n = secs / bar;
                 if (n - n.round()).abs() < 1e-3 { format!("{} bars", n.round()) } else { format!("{n:.1} bars") }
             };
+            let each = if long - short > 1e-3 {
+                format!("{}–{} · {:.1}–{:.1} s", bars(short).trim_end_matches(" bars"), bars(long), short, long)
+            } else {
+                format!("{} · {:.1} s, {:.1} s clear of fades", bars(short), short, short - fade)
+            };
             let rows = [
-                (
-                    "Each image",
-                    format!("{} · {:.1} s, {:.1} s clear of fades", plan.slot.label(), plan.slot.secs, plan.slot.secs - fade),
-                ),
+                ("Each image", each),
                 ("Intro", format!("{} · {:.1} s", bars(plan.intro), plan.intro)),
-                ("Images", format!("{} · {}", plan.images, fmt_time(plan.images as f64 * plan.slot.secs))),
+                ("Images", format!("{} · {}", plan.images, fmt_time(plan.end - plan.intro))),
                 ("Outro", format!("{} · {:.1} s, then {:.0} s reverb tail", bars(plan.outro), plan.outro, plan.tail)),
                 (
                     "Track",
@@ -1379,7 +1411,14 @@ impl App {
                         plan.grid.meter.1
                     ),
                 ),
-                ("Clip length", format!("{:.2} s where clips overlap (see tip)", plan.slot.secs + s.fade as f64)),
+                (
+                    "Clip length",
+                    if long - short > 1e-3 {
+                        format!("its time + {:.1} s where clips overlap", s.fade)
+                    } else {
+                        format!("{:.2} s where clips overlap (see tip)", short + s.fade as f64)
+                    },
+                ),
             ];
             for (k, v) in rows {
                 ui.horizontal(|ui| {
@@ -1414,9 +1453,15 @@ impl App {
                     .clicked();
             });
             ui.add_space(4.0);
+            ui.checkbox(&mut follow, "Change images on the music's accents").on_hover_text(
+                "Move each change to where the music marks a moment (a new section or phrase, a chord change, a \
+                 part coming in or dropping out), so each image's time varies around the time per image. Off, \
+                 the images change on an even count.",
+            );
             ui.checkbox(&mut show, "Show image changes on the timeline");
         });
         self.slideshow.show_on_timeline = show;
+        self.slideshow.follow_music = follow;
         if copy {
             ui.ctx().copy_text(plan.cue_csv(self.slideshow.fade as f64));
             self.status = format!("Copied the cue list for {} images", plan.images);
@@ -2030,7 +2075,7 @@ impl App {
             let plan = self.slide_plan();
             let x_s = |secs: f64| x_of(song.secs_to_tick(secs)).min(x_of(song.total_ticks));
             let shade = if dark { Color32::from_white_alpha(8) } else { Color32::from_black_alpha(10) };
-            let images_end = plan.intro + plan.images as f64 * plan.slot.secs;
+            let images_end = plan.end;
             for (a, b, label) in [(0.0, plan.intro, "intro"), (images_end, plan.total, "outro")] {
                 let r = Rect::from_x_y_ranges(x_s(a)..=x_s(b), roll.y_range());
                 if r.width() > 0.5 {
@@ -2138,7 +2183,19 @@ impl App {
         // playhead
         let playhead = self.player.as_ref().map(|p| song.secs_to_tick(p.position()).min(song.total_ticks));
         if let Some(tick) = playhead {
-            clipped.vline(x_of(tick), roll.y_range(), Stroke::new(2.0, Color32::from_rgb(255, 120, 90)));
+            let col = Color32::from_rgb(255, 120, 90);
+            let x = x_of(tick);
+            clipped.vline(x, roll.y_range(), Stroke::new(2.0, col));
+            // the time in seconds beside the chords, on a backing so it reads over them
+            if x >= roll.left() && x <= roll.right() {
+                let secs = song.tick_to_secs(tick);
+                let g = painter.layout_no_wrap(format!("{secs:.1} s"), tk.font(11.0), col);
+                let w = g.size().x + 6.0;
+                let left = if x + 2.0 + w > roll.right() { x - 2.0 - w } else { x + 2.0 };
+                let r = Rect::from_min_size(Pos2::new(left, rect.top() + 2.0), Vec2::new(w, header - 4.0));
+                head.rect_filled(r, 3.0, tk.canvas);
+                head.galley(Pos2::new(r.left() + 3.0, r.center().y - g.size().y / 2.0), g, col);
+            }
         }
 
         // What the pointer did: seek, switch notes, or open a note's menu.

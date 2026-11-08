@@ -95,6 +95,9 @@ fn auto_expr(song: &Song, n: &Note, prev: Option<u8>) -> Expr {
     if matches!(song.params.style, Style::NeonNoir | Style::MegacityRain) {
         return noir_expr(song, n, prev);
     }
+    if song.params.style == Style::NeonGlide {
+        return glide_expr(song, n, prev);
+    }
     // a score shapes its own swells
     if song.params.style.is_score() {
         return Expr::default();
@@ -155,6 +158,28 @@ fn noir_expr(song: &Song, n: &Note, prev: Option<u8>) -> Expr {
         }
         Inst::Cello => e.vibrato = 0.12 * ((secs - 2.0) / 2.0).clamp(0.0, 1.0),
         _ => {}
+    }
+    e
+}
+
+/// Neon Glide plays its CS-80 chords by hand: some swoop up into the chord
+/// as it swells in, the held ones take on vibrato as if pressed harder, and
+/// they sag as they die away at a breath. The sweep pad's swells do the
+/// same, and the lead sings like Neon Noir's.
+fn glide_expr(song: &Song, n: &Note, prev: Option<u8>) -> Expr {
+    if !matches!(n.inst, Inst::StringPad | Inst::Brass) {
+        return noir_expr(song, n, prev);
+    }
+    let secs = (song.tick_to_secs(n.end()) - song.tick_to_secs(n.start)) as f32;
+    // decided for the whole chord, whose notes start together
+    let chord = Note { start: (n.start + song.ppq / 4) / (song.ppq / 2), key: 0, ..*n };
+    let h = |salt| note_hash(song.params.seed, &chord, salt);
+    let mut e = Expr::default();
+    e.vibrato = (0.2 + 0.2 * h(1)) * ((secs - 2.0) / 2.0).clamp(0.0, 1.0);
+    if breath_after(song, n) && secs > 1.5 && h(2) < 0.75 {
+        e.bend = -(0.25 + 0.3 * h(3));
+    } else if secs > 2.0 && h(4) < 0.4 {
+        e.bend = 0.5 + 0.4 * h(5);
     }
     e
 }

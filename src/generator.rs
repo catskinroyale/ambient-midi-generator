@@ -154,6 +154,7 @@ pub fn generate(p: &Params) -> Song {
         Style::TechTrailer => ctx.tech_trailer(),
         Style::MegacityRain => ctx.megacity_rain(),
         Style::StarCathedral => ctx.star_cathedral(),
+        Style::NeonGlide => ctx.neon_glide(),
     }
     if p.style.is_score() {
         ctx.score_dynamics();
@@ -192,23 +193,36 @@ pub fn auto_sections(style: Style, n: u32) -> Vec<u32> {
             let build = at(0.17).max(1).min(peak);
             vec![build, peak, hold, outro]
         }
+        Style::NeonGlide => {
+            let even = |x: f64| at(x) / 2 * 2;
+            let finale = even(0.8).max(1);
+            let bridge = even(0.68).min(finale);
+            let bloom = even(0.45).min(bridge);
+            let groove = even(0.12).max(1).min(bloom);
+            vec![groove, bloom, bridge, finale]
+        }
         _ => return Vec::new(),
     };
     std::iter::once(0).chain(starts.iter().copied()).zip(starts.iter().copied().chain([n])).map(|(a, b)| b - a).collect()
 }
 
+/// Where each section of a score `bars` long after the first begins: as set
+/// by hand, or the arc scaled to the length. None for other styles.
+pub fn section_starts(p: &Params, bars: u32) -> Vec<u32> {
+    let lengths = match p.custom_sections() {
+        Some(s) if s.iter().sum::<u32>() == bars => s.to_vec(),
+        _ => auto_sections(p.style, bars),
+    };
+    lengths.iter().scan(0, |at, len| {
+        *at += len;
+        Some(*at)
+    }).take(lengths.len().saturating_sub(1)).collect()
+}
+
 impl<'a> Ctx<'a> {
-    /// Where each section of a score after the first begins: as set by hand,
-    /// or the arc scaled to the length.
+    /// Where each section of a score after the first begins.
     fn bounds(&self) -> Vec<u32> {
-        let lengths = match self.p.custom_sections() {
-            Some(s) if s.iter().sum::<u32>() == self.bars => s.to_vec(),
-            _ => auto_sections(self.p.style, self.bars),
-        };
-        lengths.iter().scan(0, |at, len| {
-            *at += len;
-            Some(*at)
-        }).take(lengths.len() - 1).collect()
+        section_starts(self.p, self.bars)
     }
 
     /// For a score's layers: how much later than written (above 1) or earlier
@@ -4226,6 +4240,386 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Neon Glide: a lush, retro-futuristic synth score for a neon city at
+    /// night, gliding on a slow groove. A CS-80 pad swelling in over rain and
+    /// a kalimba pulse in dotted eighths rolling against the beat; then a
+    /// patient groove of muted kick, filtered snare and ghost notes, shaker,
+    /// tabla in threes against fours and wooden clicks, a swung sub bass,
+    /// electric piano in minor sevenths and ninths, and a lonely, sax-like
+    /// lead with a simple theme; the groove opening up, the pads blooming and
+    /// the lead growing; a sparse bridge; and a last swell fading to shimmer.
+    fn neon_glide(&mut self) {
+        let beat = self.ppq;
+        let bar = self.bar;
+        let e8 = beat / 2;
+        let s16 = beat / 4;
+        let n = self.bars;
+        let ticks = |secs: f64| (secs * self.p.tempo.clamp(30.0, 200.0) as f64 / 60.0 * beat as f64) as u32;
+        let bounds = self.bounds();
+        let (groove, bloom, bridge, finale) = (bounds[0], bounds[1], bounds[2], bounds[3]);
+        let d = self.density();
+        let v = self.p.variation as f64;
+        // the last chord, held as it fades
+        let held = n - ((n - finale) / 3).clamp(1, 4).min(n - finale);
+        let in_groove = |b: u32| (b >= groove && b < bridge) || (b >= finale && b < held);
+        let in_bridge = |b: u32| b >= bridge && b < finale;
+
+        self.intensity = (0..n)
+            .map(|b| {
+                let x = |a: u32, z: u32| (b.max(a) - a) as f64 / (z - a).max(1) as f64;
+                if b < groove {
+                    0.2 + 0.1 * x(0, groove)
+                } else if b < bloom {
+                    0.4 + 0.2 * x(groove, bloom)
+                } else if b < bridge {
+                    0.6 + 0.35 * x(bloom, bridge)
+                } else if b < finale {
+                    0.3
+                } else if b < held {
+                    0.85 + 0.15 * x(finale, held)
+                } else {
+                    0.6 - 0.5 * x(held, n)
+                }
+            })
+            .collect();
+        // when each layer of the groove comes in: earlier when busy, later when sparse
+        let late = self.late();
+        let into = |x: f64| (groove + ((bloom - groove) as f64 * (x * late).min(1.0)).round() as u32).min(bloom);
+        let kalimba_from = (groove as f64 * (0.4 * late).min(1.0)).round() as u32;
+        let shaker_from = into(0.1);
+        let tabla_from = into(0.3);
+        let wood_from = into(0.5);
+        // the lead comes in at the start of its theme, eight bars on
+        let lead_from = (groove + (into(0.2) - groove).div_ceil(8) * 8).min(bloom.max(groove));
+
+        // Harmony, two bars a chord: minor sevenths and ninths, and suspensions
+        // left hanging. The groove, the bloom and the finale share a
+        // progression; the bridge has its own; the last chord is held.
+        let mut rng = self.rng("glide-harmony");
+        let mains: [&[i32]; 5] = [&[0, 5, 3, 4], &[0, 3, 5, 4], &[0, 5, 2, 6], &[0, 6, 5, 4], &[0, 2, 5, 3]];
+        let middles: [&[i32]; 4] = [&[5, 3, 5, 4], &[3, 0, 5, 4], &[5, 6, 3, 4], &[3, 5, 3, 4]];
+        let exts = [Ext::Seventh, Ext::Ninth, Ext::Sus4, Ext::Add9];
+        let prog = |rng: &mut Rng, pool: &[&[i32]], w: &[f64]| -> Vec<Chord> {
+            let degs = *rng.pick(pool);
+            degs.iter().map(|d| Chord::new(self.fix_dim(*d), exts[rng.weighted(w)])).collect()
+        };
+        let main = prog(&mut rng, &mains, &[0.35, 0.35, 0.15, 0.15]);
+        let middle = prog(&mut rng, &middles, &[0.3, 0.25, 0.3, 0.15]);
+        let home = Chord::new(0, if rng.chance(0.5) { Ext::Ninth } else { Ext::Add9 });
+        // where the chords count from: each chord lasts two bars from here
+        let anchor = |b: u32| [0, groove, bridge, finale, held].into_iter().filter(|a| *a <= b).max().unwrap_or(0);
+        self.harmony = (0..n)
+            .map(|b| {
+                let i = ((b - anchor(b)) / 2 % 4) as usize;
+                if b >= held {
+                    home.clone()
+                } else if in_bridge(b) {
+                    middle[i].clone()
+                } else {
+                    main[i].clone()
+                }
+            })
+            .collect();
+        self.section = (0..n).map(|b| bounds.iter().filter(|s| b >= **s).count() as u8).collect();
+        self.vary_harmony(&[held..n]);
+        // each chord: (first bar, bars)
+        let mut chords: Vec<(u32, u32)> = Vec::new();
+        for b in 0..n {
+            if b == anchor(b) || (b - anchor(b)) % 2 == 0 {
+                chords.push((b, 1));
+            } else if let Some(last) = chords.last_mut() {
+                last.1 += 1;
+            }
+        }
+        let tonic_pc = self.scale.midi(0).rem_euclid(12);
+        let end = n * bar + bar;
+
+        // ---- the CS-80: chords swelling in and out, every fourth breathing
+        // (and sagging, see expression); in the bloom and the finale they open
+        // out an octave, and the sweep pad blooms above them
+        let mut prev = Vec::new();
+        let mut wide = Vec::new();
+        for (i, &(b, len)) in chords.iter().enumerate() {
+            let chord = self.harmony[b as usize].clone();
+            let it = self.it(b);
+            let start = b * bar;
+            let span = len * bar;
+            let last = b >= held;
+            let breath = i % 4 == 3 && !last;
+            let dur = if last { span } else if breath { span - beat - e8 } else { span + beat / 4 };
+            let voicing = self.thin(voice_lead(&chord.pitch_classes(&self.scale), &prev, 48, 72, false));
+            prev = voicing.clone();
+            for k in &voicing {
+                self.note(Inst::StringPad, start, dur, *k, 46.0 + 30.0 * it);
+            }
+            let blooming = (b >= bloom && b < bridge) || b >= finale;
+            if blooming {
+                if let Some(top) = voicing.last() {
+                    self.note(Inst::StringPad, start, dur, top + 12, 34.0 + 24.0 * it);
+                }
+                let spread = voice_lead(&chord.pitch_classes(&self.scale), &wide, 60, 86, true);
+                wide = spread.clone();
+                for k in &spread {
+                    self.note(Inst::Brass, start, dur, *k, 50.0 + 30.0 * it);
+                }
+                let to = if last { 0.0 } else { 50.0 };
+                self.swell(Inst::Brass, start, span, 20.0, if last { 95.0 } else { 70.0 + 30.0 * it }, to);
+            }
+            if b < groove {
+                // the opening: each chord swells in slowly from nothing
+                self.swell(Inst::StringPad, start, span, 0.0, 85.0 + 15.0 * it, 60.0);
+            } else if last {
+                self.swell(Inst::StringPad, start, span + bar, 95.0, 100.0, 0.0);
+            } else {
+                let to = if breath { 30.0 } else { 50.0 + 20.0 * it };
+                self.swell(Inst::StringPad, start, span, 30.0 + 30.0 * it, 80.0 + 40.0 * it, to);
+            }
+        }
+
+        // ---- the electric piano: slow, rolled chords without their root (the
+        // bass has it), from the groove to the end; alone with the pad in
+        // the bridge, where it rolls each chord out slowly
+        let keys = self.variant("keys", 2);
+        let mut prev = Vec::new();
+        for &(b, len) in chords.iter().filter(|(b, _)| *b >= groove) {
+            let chord = self.harmony[b as usize].clone();
+            let it = self.it(b);
+            let mut pcs = chord.pitch_classes(&self.scale);
+            if pcs.len() >= 4 {
+                pcs.remove(0);
+            }
+            let voicing = voice_lead(&pcs, &prev, 52, 74, false);
+            prev = voicing.clone();
+            let start = b * bar;
+            let span = len * bar;
+            let vel = 54.0 + 16.0 * it;
+            // anticipated by an eighth, now and then
+            let early = keys == 1 && b > groove && b < held && (b / 2) % 2 == 1;
+            let at = if early { start - e8 } else { start };
+            let roll = if in_bridge(b) { e8 } else { 25 };
+            for (j, k) in voicing.iter().enumerate() {
+                self.note(Inst::Piano, at + j as u32 * roll, span - j as u32 * roll, *k, vel - 3.0 * j as f64);
+            }
+            // a soft touch again in the chord's second bar, on the "and" of two
+            if len >= 2 && b < held && d >= 0.3 {
+                let again = start + bar + 3 * e8;
+                for k in voicing.iter().rev().take(2) {
+                    self.note(Inst::Piano, again, bar - 3 * e8, *k, vel - 14.0);
+                }
+            }
+        }
+
+        // ---- the kalimba: chord tones in dotted eighths, so the pattern rolls
+        // three against four and comes round to the bar every three bars;
+        // half as often in the bridge, and fading at the end
+        let pattern: &[usize] = match self.variant("kalimba", 3) {
+            0 => &[0, 2, 1, 3],
+            1 => &[0, 1, 2, 3, 2, 1],
+            _ => &[0, 3, 1, 2],
+        };
+        let mut k = 0usize;
+        let mut t = kalimba_from * bar;
+        while t < (n - 1) * bar {
+            let b = t / bar;
+            let thin = in_bridge(b) || d < 0.3;
+            if !thin || k % 2 == 0 {
+                let chord = self.harmony[b as usize].clone();
+                let tones = voice_lead(&chord.pitch_classes(&self.scale), &[], 62, 86, false);
+                let key = tones[pattern[k % pattern.len()] % tones.len()];
+                let fading = if b >= held { 1.0 - (t - held * bar) as f64 / ((n - 1 - held).max(1) * bar) as f64 } else { 1.0 };
+                let accent = if t % beat == 0 { 8.0 } else { 0.0 };
+                self.note(Inst::Pizzicato, t, 3 * s16, key, (44.0 + 16.0 * self.it(b) + accent) * fading.max(0.3));
+            }
+            k += 1;
+            t += 3 * s16;
+        }
+
+        // ---- the sub bass: a warm, swung figure under the groove, leaning
+        // into the next chord a half step below; one long note at the end
+        let pat: &[(u32, u32, i32)] =
+            if self.variant("bass", 2) == 0 { &[(0, 3, 0), (3, 1, 0), (4, 3, 7), (7, 1, 12)] } else { &[(0, 2, 0), (3, 2, 0), (5, 1, 7), (6, 2, 0)] };
+        let swing = e8 / 6;
+        for b in (0..n).filter(|b| in_groove(*b)) {
+            let chord = self.harmony[b as usize].clone();
+            let root = self.bass_key(&chord, 33);
+            let next = self.harmony.get(b as usize + 1).map(|c| self.bass_key(c, 33));
+            let it = self.it(b);
+            for &(on, len, iv) in pat {
+                if d < 0.3 && on == 7 {
+                    continue;
+                }
+                let start = b * bar + on * e8 + if on % 2 == 1 { swing } else { 0 };
+                let mut key = root + iv;
+                if on >= 6 && next.is_some_and(|x| x != root) {
+                    key = next.unwrap() - 1;
+                }
+                self.note(Inst::Cello, start, len * e8 - e8 / 4, key, 72.0 + 14.0 * it + if on == 0 { 8.0 } else { 0.0 });
+            }
+            if d > 0.7 {
+                self.note(Inst::Cello, b * bar + 15 * s16 + swing / 2, s16, root + 12, 60.0);
+            }
+        }
+        if held < n {
+            let root = self.bass_key(&self.harmony[held as usize], 33);
+            self.note(Inst::Cello, held * bar, (n - held) * bar, root, 70.0);
+        }
+
+        // ---- the groove: a muted kick, a soft filtered snare on three with
+        // ghost notes around it, a swung shaker, tabla in threes against the
+        // beat, and wooden clicks; in the bridge only the hand percussion,
+        // soft and far off in its echoes
+        let kick_kind = self.variant("kick", 2);
+        let tabla_kind = self.variant("tabla", 2);
+        let mut grng = self.rng("glide-ghosts");
+        let wood_at: Vec<u32> = (0..2).map(|_| *grng.pick(&[2, 5, 13, 14])).collect();
+        let swung = |i: u32| i * s16 + if i % 2 == 1 { s16 / 5 } else { 0 };
+        for b in groove..held {
+            let bs = b * bar;
+            let it = self.it(b);
+            let quiet = in_bridge(b);
+            let phrase = (b - anchor(b)) % 2;
+            if !quiet {
+                let kicks: &[u32] = match (kick_kind, phrase) {
+                    (0, 0) => &[0, 10],
+                    (0, _) => &[0],
+                    (_, 0) => &[0, 7],
+                    _ => &[0, 10],
+                };
+                for at in kicks {
+                    self.note(Inst::Drums, bs + at * s16, e8, drum::DEEP_KICK as i32, if *at == 0 { 84.0 } else { 70.0 } + 8.0 * it);
+                }
+                if d > 0.7 && phrase == 1 {
+                    self.note(Inst::Drums, bs + swung(11), e8, drum::DEEP_KICK as i32, 64.0);
+                }
+                self.note(Inst::Drums, bs + 2 * beat, e8, drum::GATED_SNARE as i32, 46.0 + 12.0 * it);
+                let ghosts = (1.0 + 2.0 * d + it).round() as usize;
+                for _ in 0..ghosts {
+                    let at = *grng.pick(&[3, 6, 11, 13, 14, 15]);
+                    self.note(Inst::Drums, bs + swung(at), s16, drum::GATED_SNARE as i32, grng.range_f(18.0, 28.0));
+                }
+            }
+            if b >= shaker_from {
+                let step = if d < 0.3 || quiet { 2 } else { 1 };
+                for i in (0..16).step_by(step) {
+                    let vel = [22.0, 30.0, 26.0, 36.0][i as usize % 4] + 6.0 * it - if quiet { 10.0 } else { 0.0 };
+                    self.note(Inst::Drums, bs + swung(i), s16, drum::SHAKER as i32, vel);
+                }
+            }
+            if b >= tabla_from {
+                // three strokes to every two beats, or a stroke every three sixteenths
+                let (gap, count) = if tabla_kind == 0 { (2 * beat / 3, 6) } else { (3 * s16, 5) };
+                let strokes = [drum::TABLA_HIGH, drum::TABLA_LOW, drum::TABLA_HIGH, drum::TABLA_HIGH, drum::TABLA_LOW, drum::TABLA_HIGH];
+                for i in 0..count {
+                    if (quiet && i % 3 != 0) || grng.chance(0.25 * (1.0 - d)) {
+                        continue;
+                    }
+                    let key = strokes[i as usize % strokes.len()];
+                    let vel = if key == drum::TABLA_LOW { 52.0 } else { 44.0 } + 12.0 * it - if quiet { 8.0 } else { 0.0 };
+                    self.note(Inst::Drums, bs + i * gap, e8, key as i32, vel);
+                }
+            }
+            if b >= wood_from {
+                let at = wood_at[(phrase as usize).min(1)];
+                self.note(Inst::Drums, bs + swung(at), s16, drum::WOOD as i32, 38.0 + 8.0 * it);
+            }
+        }
+
+        // ---- the lead: a simple theme of two four-bar phrases, the second
+        // answering the first, each three bars of long notes and wide leaps
+        // and a bar of rest. It comes in during the groove, rises an octave
+        // as the pads bloom, rests through the bridge and sings out once more
+        // in the finale.
+        const CELLS: &[&[(u32, u32)]] =
+            &[&[(0, 6), (6, 2)], &[(2, 6)], &[(0, 3), (3, 5)], &[(0, 8)], &[(1, 3), (4, 4)], &[(0, 2), (2, 6)], &[(0, 5), (5, 3)]];
+        let mut trng = self.rng("glide-theme");
+        let mut theme: Vec<(u32, u32, u32, i32)> = Vec::new();
+        let mut deg = trng.range(4, 6);
+        for phrase in 0..2u32 {
+            for pb in 0..3u32 {
+                let cell = if pb == 2 { *trng.pick(&[&CELLS[1], &CELLS[3]]) } else { *trng.pick(CELLS) };
+                for &(on, dur) in cell {
+                    let step = if dur >= 4 {
+                        *trng.pick(&[-4, -3, 3, 4, 5, 7, -2, 2])
+                    } else {
+                        *trng.pick(&[-2, -1, 1, 2])
+                    };
+                    deg += step;
+                    if !(2..=12).contains(&deg) {
+                        deg -= 2 * step;
+                    }
+                    deg = deg.clamp(2, 12);
+                    theme.push((phrase * 4 + pb, on, dur, deg));
+                }
+            }
+        }
+        let mut vrng = self.rng("glide-lead-variation");
+        let mut line = Vec::new();
+        for b in (0..n).filter(|b| (*b >= lead_from && *b < bridge) || (*b >= finale && *b < held)) {
+            let tb = (b - if b >= finale { finale } else { groove }) % 8;
+            let chord = self.harmony[b as usize].clone();
+            let it = self.it(b);
+            let lift = if tb >= 4 && ((b >= bloom && b < bridge) || b >= finale) { 7 } else { 0 };
+            for (i, &(_, on, dur, deg)) in theme.iter().enumerate().filter(|(_, t)| t.0 == tb) {
+                let mut dd = deg;
+                // with the variation, a note moves now and then as it grows
+                if b >= bloom && vrng.chance(0.3 * v) {
+                    dd += *vrng.pick(&[-2, -1, 1, 2]);
+                }
+                let long = dur >= 4;
+                if long || on == 0 {
+                    dd = self.nearest_tone(dd, &chord, false);
+                }
+                // the first phrase ends hanging, off the root
+                let phrase_end = theme.get(i + 1).is_none_or(|t| t.0 / 4 != tb / 4);
+                if phrase_end && tb < 4 && (dd - chord.root).rem_euclid(7) == 0 {
+                    dd += 2;
+                }
+                let key = self.scale.midi(dd + lift);
+                let start = b * bar + on * e8;
+                let vel = 60.0 + 30.0 * it + if on == 0 { 5.0 } else { 0.0 };
+                // a bluesy slip up from a half step below, now and then
+                if long && on > 0 && vrng.chance(0.2 + 0.2 * v) {
+                    line.push(Note { start: start - s16 / 2, dur: s16 / 2, key: (key - 1).clamp(21, 108) as u8, vel: (vel * 0.6) as u8, inst: Inst::Violin });
+                }
+                let len = if phrase_end { dur * e8 + beat } else { dur * e8 + e8 / 3 };
+                line.push(Note { start, dur: len, key: key.clamp(21, 108) as u8, vel: vel.clamp(1.0, 127.0) as u8, inst: Inst::Violin });
+            }
+        }
+        // played a little loosely, like a soloist
+        let mut rubato = self.rng("rubato");
+        let loose = (self.p.humanize as f64 / 0.4).min(2.5);
+        for note in line.iter_mut() {
+            note.start = (note.start as f64 + rubato.gauss() * loose * beat as f64 / 14.0).max(0.0) as u32;
+        }
+        self.notes.extend(line);
+
+        // ---- the city: rain throughout, distant machinery and an analogue
+        // drone in the opening, thunder far off, a reversed cymbal into the
+        // bloom and the finale, and glassy shimmer as it fades
+        self.note(Inst::Fx, 0, end, fx::RAIN as i32, 58.0);
+        self.note(Inst::Fx, 0, (groove + 4).min(n) * bar, fx::HUM as i32, 46.0);
+        self.note(Inst::Fx, 0, ticks(16.0), fx::ANALOG_DRONE as i32 + tonic_pc, 50.0);
+        if bridge < finale {
+            self.note(Inst::Fx, bridge * bar, ticks(16.0), fx::ANALOG_DRONE as i32 + tonic_pc, 46.0);
+        }
+        let mut frng = self.rng("glide-city");
+        for (a, z) in [(1, groove.max(2)), (bridge, finale)] {
+            if z > a {
+                let b = frng.range(a as i32, z as i32 - 1) as u32;
+                self.note(Inst::Fx, b * bar, ticks(9.0), fx::THUNDER as i32, 50.0);
+            }
+        }
+        let rev = ticks(kit::REVERSE_LONG_SECS);
+        for at in [bloom, finale] {
+            if at > 0 && at < n && at * bar > rev {
+                self.note(Inst::Fx, at * bar - rev, rev, fx::REVERSE_LONG as i32, 56.0);
+            }
+        }
+        for b in (held..n).step_by(2) {
+            self.note(Inst::Fx, b * bar, 2 * bar, fx::GRAINS as i32 + tonic_pc, 54.0);
+        }
+    }
+
     fn arrange(&mut self, secs_per_bar: f64) {
         // a score is arranged as it is written
         if self.p.version < 2 || self.p.style.is_score() {
@@ -4566,6 +4960,41 @@ mod tests {
             let outro: Vec<&Note> = s.notes.iter().filter(|n| n.start >= end * 9 / 10).collect();
             assert!(outro.iter().all(|n| matches!(n.inst, Inst::Piano | Inst::Drums | Inst::Fx)), "seed {seed}");
             assert!(outro.iter().all(|n| n.inst != Inst::Drums || n.key == drum::TICK));
+        }
+    }
+
+    /// Neon Glide: the opening is pad, kalimba and the city; the groove is
+    /// soft, with tabla in threes against the beat; the bridge drops to the
+    /// keys, pad and hand percussion; the lead leaves room between phrases;
+    /// and it ends on a held chord with no drums or groove.
+    #[test]
+    fn the_glide_sways() {
+        use crate::kit::drum;
+        for seed in 1..9u64 {
+            let p = Params { style: Style::NeonGlide, seed, tempo: 94.0, humanize: 0.0, ..Params::default() };
+            let s = generate(&p);
+            let bar = s.bar_ticks();
+            let end = s.bars * bar;
+            let sec = auto_sections(Style::NeonGlide, s.bars);
+            let starts: Vec<u32> = sec.iter().scan(0, |a, l| { *a += l; Some(*a - l) }).collect();
+            let (groove, bridge, finale) = (starts[1], starts[3], starts[4]);
+            let during = |a: u32, b: u32| s.notes.iter().filter(move |n| n.start >= a * bar && n.start < b * bar);
+            assert!(during(0, groove).all(|n| matches!(n.inst, Inst::StringPad | Inst::Pizzicato | Inst::Fx)), "seed {seed}: opening");
+            assert!(s.notes.iter().filter(|n| n.inst == Inst::Drums).all(|n| n.vel < 100), "seed {seed}: the drums stay soft");
+            assert!(during(groove, bridge).any(|n| n.inst == Inst::Drums && matches!(n.key, drum::TABLA_HIGH | drum::TABLA_LOW)));
+            // the bridge: keys, pad, kalimba and hand percussion only
+            for n in during(bridge, finale) {
+                assert!(matches!(n.inst, Inst::Piano | Inst::StringPad | Inst::Pizzicato | Inst::Drums | Inst::Fx), "seed {seed}: {:?} in the bridge", n.inst);
+                assert!(n.inst != Inst::Drums || !matches!(n.key, drum::DEEP_KICK | drum::GATED_SNARE), "seed {seed}");
+            }
+            // the lead rests a bar in every four of its theme
+            let lead_bars: Vec<u32> = s.notes.iter().filter(|n| n.inst == Inst::Violin).map(|n| n.start / bar).collect();
+            assert!(!lead_bars.is_empty(), "seed {seed}");
+            assert!(lead_bars.iter().all(|b| (b - if *b >= finale { finale } else { groove }) % 4 != 3), "seed {seed}");
+            // the end: a chord held as it fades, with no drums or bass figure
+            let last = during(s.bars - 1, s.bars + 1).collect::<Vec<_>>();
+            assert!(last.iter().all(|n| !matches!(n.inst, Inst::Drums | Inst::Violin)), "seed {seed}");
+            assert!(s.notes.iter().any(|n| n.inst == Inst::StringPad && n.end() >= end), "seed {seed}");
         }
     }
 

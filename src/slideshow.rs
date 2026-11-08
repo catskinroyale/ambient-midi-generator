@@ -1,9 +1,13 @@
 //! Fitting a photo slideshow to the music: how many images a track holds, or
 //! how long a track a number of images needs. Images change on bar lines
 //! (or, when no whole number of bars fits, on half bars or beats), after an
-//! intro and before an outro of whole bars.
+//! intro and before an outro of whole bars. Following the music, each
+//! change moves to where the music marks a moment (a new section, a phrase,
+//! a chord change, a part coming in or dropping out), so the pictures turn
+//! with it rather than on an even count across it.
 
 use crate::player::REVERB_TAIL;
+use crate::song::{Inst, Song};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +41,9 @@ pub struct Slideshow {
     pub outro_bars: u32,
     /// Mark the image changes on the timeline.
     pub show_on_timeline: bool,
+    /// Change images where the music marks a moment, letting each image's
+    /// time vary around `hold`, rather than on an even count.
+    pub follow_music: bool,
 }
 
 impl Default for Slideshow {
@@ -49,6 +56,7 @@ impl Default for Slideshow {
             intro_bars: 2,
             outro_bars: 2,
             show_on_timeline: true,
+            follow_music: true,
         }
     }
 }
@@ -120,23 +128,20 @@ impl Slot {
             .or_else(|| best(Unit::Beat, grid.beat))
             .unwrap_or(Slot { count: 1, unit: Unit::Beat, secs: grid.beat })
     }
-
-    pub fn label(&self) -> String {
-        let unit = match self.unit {
-            Unit::Bar => "bar",
-            Unit::HalfBar => "half bar",
-            Unit::Beat => "beat",
-        };
-        format!("{} {unit}{}", self.count, if self.count == 1 { "" } else { "s" })
-    }
 }
 
 /// Where the images fall in a track.
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub grid: Grid,
+    /// Each image's time on screen on an even count; following the music,
+    /// the time it varies around.
     pub slot: Slot,
     pub images: u32,
+    /// When each image appears.
+    pub starts: Vec<f64>,
+    /// When the last image gives way to the outro.
+    pub end: f64,
     /// Music before the first image.
     pub intro: f64,
     /// Music after the last image, including any time too short for another
@@ -157,7 +162,13 @@ impl Plan {
         let room = (total - intro - min_outro).max(0.0);
         let images = (room / slot.secs + 1e-6).floor() as u32;
         let outro = total - intro - images as f64 * slot.secs;
-        Plan { grid, slot, images, intro, outro, total, tail: REVERB_TAIL }
+        Plan::even(grid, slot, images, intro, outro, total)
+    }
+
+    fn even(grid: Grid, slot: Slot, images: u32, intro: f64, outro: f64, total: f64) -> Plan {
+        let starts = (0..images).map(|i| intro + i as f64 * slot.secs).collect();
+        let end = intro + images as f64 * slot.secs;
+        Plan { grid, slot, images, starts, end, intro, outro, total, tail: REVERB_TAIL }
     }
 
     /// The track needed for the given number of images; `bars` gives its
@@ -171,7 +182,85 @@ impl Plan {
         // at least the generator's shortest piece: four bars and the ring-out
         let bars = (s.intro_bars as f64 + picture_bars + s.outro_bars.max(1) as f64).max(5.0);
         let total = bars * grid.bar();
-        Plan { grid, slot, images, intro, outro: total - intro - pictures, total, tail: REVERB_TAIL }
+        Plan::even(grid, slot, images, intro, total - intro - pictures, total)
+    }
+
+    /// Move the image changes onto the music's accents, on the same grid as
+    /// the even count: each image stays between two thirds of `hold` and half
+    /// as long again (within MIN_HOLD and MAX_HOLD), kept near it by a cost that grows with the square of how far off it
+    /// is, and a change is drawn to a strong moment and away from one where
+    /// nothing happens. Counting the images for a track, their number
+    /// follows; fitting a track to a number of images, it stays, and the
+    /// last ends no later than the even count's last. The best placement
+    /// over the whole track is found in one pass (dynamic programming).
+    /// Unchanged if the accents are of a different track.
+    pub fn follow(self, s: &Slideshow, accents: &Accents) -> Plan {
+        if self.images == 0 || (accents.bpm - self.grid.bpm).abs() > 1e-6 || accents.meter != self.grid.meter {
+            return self;
+        }
+        let unit = self.slot.secs / self.slot.count as f64;
+        let beats = (unit / self.grid.beat).round().max(1.0) as usize;
+        let at = |secs: f64| (secs / unit).round() as usize;
+        let (intro, last) = (at(self.intro), at(self.total - s.outro_bars.max(1) as f64 * self.grid.bar()));
+        if last <= intro {
+            return self;
+        }
+        let prefer = (s.hold as f64).clamp(MIN_HOLD, MAX_HOLD);
+        // from two thirds to half as long again as asked, so the pace holds
+        let lo = (prefer * 2.0 / 3.0).max(MIN_HOLD).min(self.slot.secs);
+        let hi = (prefer * 1.5).min(MAX_HOLD).max(self.slot.secs);
+        let gaps: Vec<usize> = (1..=last - intro).filter(|g| (lo - 1e-6..=hi + 1e-6).contains(&(*g as f64 * unit))).collect();
+        let cost = |g: usize| 6.0 * ((g as f64 * unit - prefer) / prefer).powi(2);
+        // only how much a moment stands out from the rest counts, so more
+        // changes earn nothing in themselves
+        let mark = |p: usize| accents.at(p * beats) - accents.typical;
+        // a longer outro than asked, in images' worth
+        let spare = |p: usize| 2.0 * (last - p) as f64 * unit / prefer;
+        let span = last - intro;
+        let fixed = (self.slot.count as usize * self.images as usize).min(span);
+        let Some(&shortest) = gaps.first() else {
+            return self;
+        };
+        // best[k][p]: the best score of k images from the intro to a change at p
+        let rows = if s.fit == Fit::TrackToImages { self.images as usize } else { span / shortest };
+        let mut best = vec![vec![f64::NEG_INFINITY; span + 1]; rows + 1];
+        let mut from = vec![vec![0usize; span + 1]; rows + 1];
+        best[0][0] = mark(intro);
+        for k in 1..=rows {
+            for p in 1..=span {
+                for &g in gaps.iter().filter(|g| **g <= p) {
+                    let v = best[k - 1][p - g] - cost(g);
+                    if v > best[k][p] {
+                        best[k][p] = v;
+                        from[k][p] = p - g;
+                    }
+                }
+                if best[k][p] > f64::NEG_INFINITY {
+                    best[k][p] += mark(intro + p);
+                }
+            }
+        }
+        let ends = |k: usize| (1..=span).map(move |p| (k, p));
+        let candidates: Vec<(usize, usize)> = match s.fit {
+            Fit::TrackToImages => ends(rows).filter(|(_, p)| *p <= fixed).collect(),
+            Fit::ImagesToTrack => (1..=rows).flat_map(ends).collect(),
+        };
+        let Some((mut k, mut p)) = candidates
+            .into_iter()
+            .filter(|(k, p)| best[*k][*p] > f64::NEG_INFINITY)
+            .max_by(|a, b| (best[a.0][a.1] - spare(intro + a.1)).total_cmp(&(best[b.0][b.1] - spare(intro + b.1))))
+        else {
+            return self;
+        };
+        let end = (intro + p) as f64 * unit;
+        let mut starts = Vec::new();
+        while k > 0 {
+            p = from[k][p];
+            starts.push((intro + p) as f64 * unit);
+            k -= 1;
+        }
+        starts.reverse();
+        Plan { images: starts.len() as u32, starts, end, outro: self.total - end, ..self }
     }
 
     /// The length of the audio, reverb tail included.
@@ -186,7 +275,17 @@ impl Plan {
 
     /// When each image appears.
     pub fn starts(&self) -> impl Iterator<Item = f64> + '_ {
-        (0..self.images).map(|i| self.intro + i as f64 * self.slot.secs)
+        self.starts.iter().copied()
+    }
+
+    /// Each image's start and end.
+    pub fn spans(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.starts.iter().copied().zip(self.starts.iter().skip(1).copied().chain([self.end]))
+    }
+
+    /// The shortest and longest time an image is on screen.
+    pub fn holds(&self) -> (f64, f64) {
+        self.spans().fold((f64::INFINITY, 0.0f64), |(lo, hi), (a, b)| (lo.min(b - a), hi.max(b - a)))
     }
 
     /// One row per image, for a video editor. `start` is when the image
@@ -196,19 +295,100 @@ impl Plan {
     /// its time on screen plus the fade.
     pub fn cue_csv(&self, fade: f64) -> String {
         let mut out = String::from("image,start,end,seconds,clip,bar.beat,fade\n");
-        for (i, t) in self.starts().enumerate() {
+        for (i, (t, end)) in self.spans().enumerate() {
             out.push_str(&format!(
                 "{},{},{},{:.2},{:.2},{},{:.2}\n",
                 i + 1,
                 timecode(t),
-                timecode(t + self.slot.secs),
-                self.slot.secs,
-                self.slot.secs + fade,
+                timecode(end),
+                end - t,
+                end - t + fade,
                 self.grid.position(t),
                 fade
             ));
         }
         out
+    }
+}
+
+/// How strongly the music marks each beat of a track: notes starting on it
+/// (the bass and drums most), a chord change, parts coming in or dropping
+/// out and the music thickening or thinning across a bar line, the start of
+/// a score's section and of the four- and eight-bar phrases that count from
+/// it; and, against all of these, a beat where nothing starts at all.
+#[derive(Clone, Debug, Default)]
+pub struct Accents {
+    pub bpm: f64,
+    pub meter: (u32, u32),
+    pub beats: Vec<f64>,
+    /// The median accent on the bar lines.
+    pub typical: f64,
+}
+
+impl Accents {
+    pub fn of(song: &Song) -> Accents {
+        let beat = song.ppq * 4 / song.meter.1;
+        let per_bar = song.meter.0 as usize;
+        let bar = song.bar_ticks();
+        let count = (song.total_ticks / beat) as usize + 1;
+        let bars = count / per_bar + 1;
+        let weight = |i: Inst| match i {
+            Inst::Cello => 1.0,
+            Inst::Drums | Inst::Fx => 0.7,
+            Inst::Pizzicato => 0.3,
+            _ => 0.5,
+        };
+        // a little either side, for humanised and rubato timing
+        let (early, late) = (song.ppq / 8, song.ppq / 4);
+        let mut onset = vec![0.0f64; count];
+        // the parts starting notes in each bar
+        let mut parts = vec![[0u32; 8]; bars];
+        for n in &song.notes {
+            let j = ((n.start + early) / beat) as usize;
+            if j < count && n.start + early - (j as u32 * beat) <= early + late {
+                onset[j] += n.vel as f64 / 127.0 * weight(n.inst);
+            }
+            if let Some(b) = parts.get_mut((n.start / bar) as usize) {
+                b[n.inst as usize] += 1;
+            }
+        }
+        let changes: Vec<usize> = song.chords.iter().map(|(t, _)| (*t / beat) as usize).collect();
+        let sections: Vec<u32> = crate::generator::section_starts(&song.params, song.bars);
+        let sum = |a: usize, z: usize, i: usize| (a..z.min(bars)).map(|b| parts[b][i]).sum::<u32>();
+        let beats: Vec<f64> = (0..count)
+            .map(|j| {
+                let mut a = if onset[j] > 0.0 { 1.0 - (-onset[j] / 1.5).exp() } else { -2.0 };
+                if j > 0 && changes.contains(&j) {
+                    a += 0.8;
+                }
+                if j % per_bar == 0 {
+                    let b = j / per_bar;
+                    if b > 0 {
+                        let (lo, hi) = (b.saturating_sub(2), b + 2);
+                        let moved = (0..8).filter(|&i| (sum(lo, b, i) == 0) != (sum(b, hi, i) == 0)).count();
+                        a += 0.7 * moved.min(3) as f64;
+                        let (x, y) = ((0..8).map(|i| sum(lo, b, i)).sum::<u32>(), (0..8).map(|i| sum(b, hi, i)).sum::<u32>());
+                        a += 0.4 * ((y as f64 + 2.0) / (x as f64 + 2.0)).ln().abs();
+                    }
+                    if sections.contains(&(b as u32)) {
+                        a += 2.0;
+                    }
+                    let from = sections.iter().copied().filter(|s| *s as usize <= b).max().unwrap_or(0) as usize;
+                    let into = b - from;
+                    a += if into % 8 == 0 { 0.5 } else if into % 4 == 0 { 0.3 } else if into % 2 == 0 { 0.1 } else { 0.0 };
+                }
+                a
+            })
+            .collect();
+        let mut downs: Vec<f64> = beats.iter().step_by(per_bar).copied().collect();
+        downs.sort_by(|a, b| a.total_cmp(b));
+        let typical = downs.get(downs.len() / 2).copied().unwrap_or(0.0);
+        Accents { bpm: song.bpm, meter: song.meter, beats, typical }
+    }
+
+    /// The accent on a beat, counted from the start; past the end, nothing.
+    pub fn at(&self, beat: usize) -> f64 {
+        self.beats.get(beat).copied().unwrap_or(-2.0)
     }
 }
 
@@ -326,6 +506,63 @@ mod music {
                     plan.starts().filter(|t| !onsets.iter().any(|o| (o - t).abs() <= 0.05)).collect();
                 assert!(missed.is_empty(), "{} seed {seed}: no note at {missed:?}", style.label());
             }
+        }
+    }
+
+    /// Following the music, every change lands on a note in the styles with a
+    /// regular pulse, at
+    /// a brisk and a lingering pace, and on each section of a score.
+    #[test]
+    fn changes_follow_the_music() {
+        let free = [Style::GenerativeLoops, Style::TidalDrone, Style::Aurora, Style::KotoGarden, Style::NeonNoir, Style::MegacityRain];
+        for style in Style::ALL {
+            for seed in [1, 2] {
+                let p = Params { style, seed, tempo: style.default_tempo(), target_seconds: 150.0, ..Params::default() };
+                let song = generate(&p);
+                let accents = Accents::of(&song);
+                let grid = Grid::new(song.bpm, song.meter);
+                let onsets: Vec<f64> = song.notes.iter().map(|n| song.tick_to_secs(n.start)).collect();
+                for hold in [6.0, 12.0] {
+                    let show = Slideshow { hold, ..Slideshow::default() };
+                    let plan = Plan::for_track(&show, grid, song.duration_secs()).follow(&show, &accents);
+                    assert!(plan.images > 0);
+                    assert!((plan.end + plan.outro - plan.total).abs() < 1e-6);
+                    assert!(plan.outro >= 2.0 * grid.bar() - 1e-6);
+                    for (a, b) in plan.spans() {
+                        assert!((MIN_HOLD - 1e-6..=MAX_HOLD + 1e-6).contains(&(b - a)), "{} {a} {b}", style.label());
+                    }
+                    let missed: Vec<f64> = plan.starts().filter(|t| !onsets.iter().any(|o| (o - t).abs() <= 0.05)).collect();
+                    // (some styles leave longer than an image between notes on the bar lines)
+                    assert!(missed.is_empty() || free.contains(&style), "{} seed {seed} hold {hold}: no note at {missed:?}", style.label());
+                    if hold == 12.0 {
+                        for s in crate::generator::section_starts(&song.params, song.bars) {
+                            let t = s as f64 * grid.bar();
+                            // (one starting just after the first image, too soon for a change, aside)
+                            if t >= plan.intro + hold as f64 / 2.0 && t <= plan.end + 1e-6 {
+                                let hit = plan.starts().chain([plan.end]).any(|x| (x - t).abs() < 1e-6);
+                                assert!(hit, "{} seed {seed}: no change at section bar {s}", style.label());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fitting the track to the images keeps their number, inside the track.
+    #[test]
+    fn following_keeps_the_count() {
+        let p = Params { style: Style::NeonGlide, seed: 1, tempo: 94.0, ..Params::default() };
+        for images in [3, 12, 40] {
+            let show = Slideshow { fit: Fit::TrackToImages, images, ..Slideshow::default() };
+            let grid = Grid::new(94.0, (4, 4));
+            let even = Plan::for_images(&show, grid);
+            let song = generate(&Params { length_mode: crate::song::LengthMode::Bars, target_bars: even.bars() - 1, ..p.clone() });
+            assert!((song.duration_secs() - even.total).abs() < 0.01);
+            let plan = even.clone().follow(&show, &Accents::of(&song));
+            assert_eq!(plan.images, images);
+            assert!(plan.end <= even.end + 1e-6);
+            assert_eq!(plan.cue_csv(1.0).lines().count(), images as usize + 1);
         }
     }
 }

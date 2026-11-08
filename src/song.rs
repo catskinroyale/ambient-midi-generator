@@ -31,10 +31,11 @@ pub enum Style {
     TechTrailer,
     MegacityRain,
     StarCathedral,
+    NeonGlide,
 }
 
 impl Style {
-    pub const ALL: [Style; 24] = [
+    pub const ALL: [Style; 25] = [
         Style::EtherealPads,
         Style::Gymnopedie,
         Style::GenerativeLoops,
@@ -59,12 +60,13 @@ impl Style {
         Style::TechTrailer,
         Style::MegacityRain,
         Style::StarCathedral,
+        Style::NeonGlide,
     ];
 
     /// A score is written as one arc, intro to build to peak to outro, for a
     /// full orchestra with drums and trailer effects.
     pub fn is_score(self) -> bool {
-        matches!(self, Style::TechTrailer | Style::MegacityRain | Style::StarCathedral)
+        matches!(self, Style::TechTrailer | Style::MegacityRain | Style::StarCathedral | Style::NeonGlide)
     }
 
     /// The sections of a score, in order; none for a style.
@@ -73,6 +75,7 @@ impl Style {
             Style::TechTrailer => &["Intro", "Build", "Peak", "Outro"],
             Style::MegacityRain => &["Rain", "Lone lead", "Body", "Recede"],
             Style::StarCathedral => &["Opening", "Build", "Climax", "Held chord", "Outro"],
+            Style::NeonGlide => &["Opening", "Groove", "Bloom", "Bridge", "Finale"],
             _ => &[],
         }
     }
@@ -103,6 +106,7 @@ impl Style {
             Style::TechTrailer => "Tech Trailer",
             Style::MegacityRain => "Megacity Rain",
             Style::StarCathedral => "Cathedral of Stars",
+            Style::NeonGlide => "Neon Glide",
         }
     }
 
@@ -188,6 +192,13 @@ impl Style {
                  sub swells gathering like a tide; a climax of full organ, huge strings, brass, choir and timpani, held in an \
                  open, shimmering chord; and the organ figure alone again, fading into silence."
             }
+            Style::NeonGlide => {
+                "A lush, retro-futuristic synth score for a neon city at night, gliding on a slow groove. A CS-80 pad \
+                 swelling in over rain, a kalimba pulse rolling three against four; a patient groove of muted kick, \
+                 ghost notes, shaker, tabla and wooden clicks in echo, a swung sub bass, electric piano in minor sevenths \
+                 and ninths, and a lonely, sax-like lead; the pads blooming as the lead grows; a sparse bridge; and a \
+                 last swell fading into shimmer."
+            }
         }
     }
 
@@ -217,6 +228,7 @@ impl Style {
             Style::TechTrailer => 80.0,
             Style::MegacityRain => 66.0,
             Style::StarCathedral => 64.0,
+            Style::NeonGlide => 94.0,
         }
     }
 
@@ -276,6 +288,12 @@ impl Style {
             Style::StarCathedral => Some(SuggestedSounds {
                 sounds: Sounds { keys: 19, pad: 49, lead: 52, bass: 42, pluck: 0, brass: 61, ..Sounds::default() },
                 electronic: &[Inst::Drums, Inst::Fx],
+            }),
+            // electric piano, CS brass, the smoky lead, sub bass, kalimba,
+            // the sweep pad, and the kit and effects
+            Style::NeonGlide => Some(SuggestedSounds {
+                sounds: Sounds { keys: 4, pad: 62, lead: 66, bass: 38, pluck: 108, brass: 95, ..Sounds::default() },
+                electronic: &[Inst::StringPad, Inst::Violin, Inst::Cello, Inst::Brass, Inst::Drums, Inst::Fx],
             }),
             _ => None,
         }
@@ -349,6 +367,28 @@ impl Style {
                 echo: Echo { time: EchoTime::DottedQuarter, feedback: 0.35, tone: 0.4, to_reverb: 0.6, ..Echo::default() },
                 ..Fx::default()
             }),
+            // a lush, wide hall with a soft top, tape wander, the ensemble
+            // chorus, and warm tape echoes bouncing side to side
+            Style::NeonGlide => Some(Fx {
+                space: Space::Hall,
+                size: 0.7,
+                tone: 0.4,
+                motion: 0.45,
+                predelay: 0.15,
+                low_cut: 0.55,
+                width: 0.95,
+                drift: 0.2,
+                ensemble: 0.55,
+                echo: Echo {
+                    time: EchoTime::DottedEighth,
+                    feedback: 0.5,
+                    tone: 0.3,
+                    ping_pong: true,
+                    to_reverb: 0.6,
+                    wow: 0.35,
+                },
+                ..Fx::default()
+            }),
             _ => None,
         }
     }
@@ -379,6 +419,16 @@ impl Style {
                     (Inst::Brass, -5.0, 0.6, 0.0),
                     (Inst::Drums, -8.0, 0.55, 0.0),
                     (Inst::Fx, -8.0, 0.35, 0.0),
+                ],
+                Style::NeonGlide => &[
+                    (Inst::Piano, -4.0, 0.5, 0.15),
+                    (Inst::StringPad, -3.0, 0.6, 0.1),
+                    (Inst::Violin, -2.0, 0.6, 0.4),
+                    (Inst::Cello, -2.0, 0.05, 0.0),
+                    (Inst::Pizzicato, -3.0, 0.5, 0.6),
+                    (Inst::Brass, -8.0, 0.65, 0.1),
+                    (Inst::Drums, -5.0, 0.3, 0.3),
+                    (Inst::Fx, -6.0, 0.3, 0.0),
                 ],
                 _ => &[
                     (Inst::Piano, 0.0, 0.7, 0.25),
@@ -453,6 +503,8 @@ impl Style {
             Style::MegacityRain => Palette { brass: &[66], ..pal(&[98, 4], &[62, 88, 95], &[81, 50], &[38], &[63]) },
             // the organ stays the organ, and the piano the piano
             Style::StarCathedral => Palette { brass: &[61, 60], ..pal(&[19], &[49, 48], &[52, 53, 91], &[42, 48], &[0]) },
+            // the brass part is the sweep pad's blooming swell
+            Style::NeonGlide => Palette { brass: &[95, 94, 88], ..pal(&[4, 5], &[62, 88], &[66, 81], &[38], &[108, 12, 98]) },
         }
     }
 }
@@ -1259,8 +1311,6 @@ impl Params {
         Params { fx: other.fx, mix: other.mix.clone(), ..self.clone() } == *other
     }
 
-    /// Identifies the notes a piece has, whatever its sounds, effects, mix or
-    /// note edits, so edits made on it can be found again.
     /// The score's sections as set by hand, if they are set and fit its style.
     pub fn custom_sections(&self) -> Option<&[u32]> {
         let names = self.style.score_sections();
@@ -1268,6 +1318,8 @@ impl Params {
             .then_some(&self.sections[..])
     }
 
+    /// Identifies the notes a piece has, whatever its sounds, effects, mix or
+    /// note edits, so edits made on it can be found again.
     pub fn piece_id(&self) -> u64 {
         let notes = Params {
             sounds: Sounds::default(),

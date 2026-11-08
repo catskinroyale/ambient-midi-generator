@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-08
+
+### Added
+- A fourth score, **Neon Glide**: a lush, retro-futuristic synth score for a neon city at night on a slow, swaying groove. A CS-80 pad swelling in over rain with hand-played bends and vibrato, a kalimba pulse rolling three against four; a muted kick, ghost notes, shaker, tabla and wooden clicks in tape echo, a swung sub bass, electric piano in minor sevenths and ninths, and a lonely, sax-like lead; the pads blooming as the lead rises; a sparse bridge; and a last swell fading into shimmer.
+- Tabla, wood click and shaker in Trailer Kit (keys 60, 61, 76 and 82).
+- The timeline shows the playhead's time in seconds beside the chord names.
+
+### Changed
+- Slideshow images change on the music's accents: each change moves to a score's new section, the start of a phrase, a chord change or a part coming in or dropping out, and each image's time varies around the time per image (from two thirds of it to half as long again). Untick **Change images on the music's accents** for the even count. The cue list gives each image its own length.
+
 ## [0.6.0] - 2026-11-08
 
 ### Added
@@ -104,7 +114,8 @@ All notable changes to this project are documented here. The project uses
 
 First release: seven ambient styles, seeded and repeatable generation, a built-in synth, GeneralUser GS SoundFont playback, MIDI and WAV export, and per-part switches and sounds.
 
-[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.3.0...v0.4.0

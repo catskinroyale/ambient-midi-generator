@@ -27,6 +27,13 @@ pub mod drum {
     pub const TOM_MID: u8 = 43;
     pub const TOM_HIGH: u8 = 45;
     pub const CRASH: u8 = 49;
+    /// Tabla: the small drum's ringing "tin", and the large drum's low
+    /// stroke, swooping up as the palm slides. General MIDI kits play bongos.
+    pub const TABLA_HIGH: u8 = 60;
+    pub const TABLA_LOW: u8 = 61;
+    /// A dry wooden click.
+    pub const WOOD: u8 = 76;
+    pub const SHAKER: u8 = 82;
 }
 
 /// Keys of the effects part. The pitched sounds take an octave of keys each:
@@ -113,6 +120,10 @@ pub fn drums(sr: f64) -> Vec<Sound> {
         one(drum::TOM_MID, "Taiko Mid", 0.9, tom(sr, 78.0, 0.42, 12)),
         one(drum::TOM_HIGH, "Taiko High", 0.8, tom(sr, 104.0, 0.34, 13)),
         one(drum::CRASH, "Crash", 0.4, cymbal(sr, 4.5, 1.1, 14)),
+        one(drum::TABLA_HIGH, "Tabla", 0.55, tabla_high(sr)),
+        one(drum::TABLA_LOW, "Tabla Low", 0.75, tabla_low(sr)),
+        one(drum::WOOD, "Wood Click", 0.4, wood(sr)),
+        one(drum::SHAKER, "Shaker", 0.2, shaker(sr)),
     ]
 }
 
@@ -485,6 +496,80 @@ fn gated_snare(sr: f64) -> Vec<f64> {
         })
         .collect();
     fade(&mut out, sr, 0.0005, 0.02);
+    out
+}
+
+/// The tabla's small drum struck at its rim: a ringing, nearly harmonic tone
+/// (the black patch on its head tunes the overtones), with a finger's tap.
+fn tabla_high(sr: f64) -> Vec<f64> {
+    let f0 = 520.0;
+    let modes = [(1.0, 1.0, 0.32), (2.0, 0.55, 0.22), (3.0, 0.35, 0.16), (4.0, 0.2, 0.1), (5.02, 0.12, 0.07)];
+    let mut oscs: Vec<Osc> = modes.iter().map(|_| Osc::default()).collect();
+    let mut bp = Svf::default();
+    let mut noise = Noise::new(60);
+    let mut out: Vec<f64> = (0..len(sr, 0.9))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let bend = 1.0 + 0.03 * (-t / 0.02).exp();
+            let ring: f64 = oscs.iter_mut().zip(&modes).map(|(o, (r, a, tau))| a * o.next(f0 * r * bend, sr) * (-t / tau).exp()).sum();
+            let tap = bp.run(noise.next(), 2400.0, 1.2, sr).band * (-t / 0.006).exp();
+            0.8 * ring + 1.5 * tap
+        })
+        .collect();
+    fade(&mut out, sr, 0.0005, 0.1);
+    out
+}
+
+/// The tabla's large drum: a deep, soft stroke whose pitch swoops up as the
+/// heel of the hand slides across the head.
+fn tabla_low(sr: f64) -> Vec<f64> {
+    let mut osc = Osc::default();
+    let mut lp = Svf::default();
+    let mut noise = Noise::new(61);
+    let mut out: Vec<f64> = (0..len(sr, 1.0))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let hz = 92.0 + 46.0 * (1.0 - (-t / 0.12).exp());
+            let body = (osc.next(hz, sr) + 0.25 * (2.0 * TAU * osc.phase).sin()) * (-t / 0.3).exp() * (1.0 - (-t / 0.003).exp());
+            let thump = lp.run(noise.next(), 400.0, 0.7, sr).low * (-t / 0.015).exp();
+            drive(body + 0.6 * thump, 1.2)
+        })
+        .collect();
+    fade(&mut out, sr, 0.001, 0.15);
+    out
+}
+
+/// A wood block: two hollow modes, gone almost at once.
+fn wood(sr: f64) -> Vec<f64> {
+    let (mut a, mut b) = (Osc::default(), Osc::default());
+    let mut hp = Svf::default();
+    let mut noise = Noise::new(76);
+    let mut out: Vec<f64> = (0..len(sr, 0.2))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let tone = a.next(1350.0, sr) * (-t / 0.045).exp() + 0.5 * b.next(2620.0, sr) * (-t / 0.02).exp();
+            let click = hp.run(noise.next(), 3000.0, 0.7, sr).high * (-t / 0.002).exp();
+            tone + 0.7 * click
+        })
+        .collect();
+    fade(&mut out, sr, 0.0003, 0.03);
+    out
+}
+
+/// A shaker: a short swish of fine beads, high and soft.
+fn shaker(sr: f64) -> Vec<f64> {
+    let (mut hp, mut lp) = (Svf::default(), Svf::default());
+    let mut noise = Noise::new(82);
+    let mut out: Vec<f64> = (0..len(sr, 0.18))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let env = (t / 0.012).min(1.0) * (-t / 0.045).exp();
+            // the beads: noise in grains rather than a smooth hiss
+            let grain = if noise.unit() < 0.35 { 1.0 } else { 0.3 };
+            lp.run(hp.run(noise.next() * grain, 5000.0, 0.7, sr).high, 10_000.0, 0.7, sr).low * env
+        })
+        .collect();
+    fade(&mut out, sr, 0.0005, 0.03);
     out
 }
 
