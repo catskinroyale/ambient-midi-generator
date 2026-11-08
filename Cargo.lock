@@ -1964,7 +1964,7 @@ dependencies = [
 
 [[package]]
 name = "midigen"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cpal",
  "eframe",

@@ -12,7 +12,7 @@ use crate::theme::{self, Tokens};
 use crate::widgets::{self, Icon};
 use crate::fonts::{FontSource, LoadedFont};
 use crate::project::{self, FontEntry, Project};
-use crate::generator::generate;
+use crate::generator::{self, generate};
 use crate::midi_export;
 use crate::mixer::{Meters, Mixer};
 use crate::mixer_ui::{MixerView, PartInfo};
@@ -178,6 +178,29 @@ fn bundled_soundfonts() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// Sections scaled to `total` bars, keeping their proportions, each at least
+/// one bar.
+fn scale_sections(sections: &[u32], total: u32) -> Vec<u32> {
+    let sum = sections.iter().sum::<u32>().max(1) as f64;
+    let total = total.max(sections.len() as u32);
+    let exact: Vec<f64> = sections.iter().map(|b| *b as f64 * total as f64 / sum).collect();
+    let mut out: Vec<u32> = exact.iter().map(|x| (x.floor() as u32).max(1)).collect();
+    // hand out what's left (or take back what's over) by the largest remainders
+    let mut order: Vec<usize> = (0..out.len()).collect();
+    order.sort_by(|a, b| (exact[*b] - exact[*b].floor()).partial_cmp(&(exact[*a] - exact[*a].floor())).unwrap());
+    let mut i = 0;
+    while out.iter().sum::<u32>() < total {
+        let k = order[i % order.len()];
+        out[k] += 1;
+        i += 1;
+    }
+    while out.iter().sum::<u32>() > total {
+        let k = (0..out.len()).max_by_key(|k| out[*k]).unwrap();
+        out[k] -= 1;
+    }
+    out
+}
+
 fn fmt_time(s: f64) -> String {
     let s = s.max(0.0).round() as u64;
     format!("{}:{:02}", s / 60, s % 60)
@@ -319,7 +342,7 @@ impl App {
             app.status = format!("Loaded {} SoundFonts", app.fonts.len());
         }
         let snap_style = app.snapshot.as_ref().and_then(|s| {
-            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir), ("trailer", Style::TechTrailer), ("rain", Style::MegacityRain)]
+            [("electronic", Style::BerlinSchool), ("noir", Style::NeonNoir), ("trailer", Style::TechTrailer), ("rain", Style::MegacityRain), ("stars", Style::StarCathedral)]
                 .into_iter()
                 .find(|(o, _)| s.wants(o))
                 .map(|(_, st)| st)
@@ -333,6 +356,9 @@ impl App {
             }
             app.apply_style_sounds(old);
             app.sync_seed_sounds();
+            if app.snapshot.as_ref().is_some_and(|s| s.wants("bars")) {
+                app.params.sections = generator::auto_sections(style, generator::planned_bars(&app.params));
+            }
             app.regenerate();
         }
         app.sounds_for = (app.params.style, app.params.seed);
@@ -926,6 +952,52 @@ impl App {
         });
     }
 
+    /// A score's sections: scaled to the length, or each set in bars.
+    fn sections_ui(ui: &mut egui::Ui, p: &mut Params, slideshow: bool) {
+        widgets::subtitle(ui, "Sections", "The score's arc, from its opening to its close");
+        let names = p.style.score_sections();
+        let auto = generator::auto_sections(p.style, generator::planned_bars(p));
+        let mut custom = p.custom_sections().is_some();
+        let toggled = widgets::inset(ui, |ui| {
+            ui.checkbox(&mut custom, "Set the bars of each section")
+                .on_hover_text("Otherwise the sections are scaled to the length")
+                .changed()
+        });
+        if toggled {
+            p.sections = if custom { auto.iter().map(|b| (*b).max(1)).collect() } else { Vec::new() };
+        }
+        if !custom {
+            let parts: Vec<String> = names.iter().zip(&auto).map(|(n, b)| format!("{n} {b}")).collect();
+            widgets::note(ui, format!("Bars: {}.", parts.join(" · ")), "");
+            return;
+        }
+        if slideshow {
+            widgets::note(ui, "The slideshow sets the length, so the sections are scaled to fit it.", "");
+        }
+        let secs = generator::secs_per_bar(p);
+        for (i, name) in names.iter().enumerate() {
+            let id = format!("section-{i}");
+            let help = format!("{} long", fmt_time(p.sections[i] as f64 * secs));
+            let mut v = p.sections[i] as f64;
+            let spec = widgets::SliderSpec {
+                id: &id,
+                label: name,
+                help: &help,
+                min: 1.0,
+                max: 128.0,
+                default: auto[i].max(1) as f64,
+                step: 1.0,
+                decimals: 0,
+                suffix: " bars",
+                log: true,
+                ..Default::default()
+            };
+            if widgets::slider(ui, &spec, &mut v, true) {
+                p.sections[i] = (v.round() as u32).max(1);
+            }
+        }
+    }
+
     fn piece_ui(&mut self, ui: &mut egui::Ui) {
         let slideshow_bars = (self.slideshow.fit == Fit::TrackToImages).then(|| self.slide_plan());
         let p = &mut self.params;
@@ -988,7 +1060,8 @@ impl App {
             p.tempo = tempo as f32;
         }
         widgets::subtitle(ui, "Length", "Aim for a duration or a number of bars; the piece ends on the tonic");
-        if let Some(plan) = slideshow_bars {
+        let custom_sections = p.custom_sections().is_some();
+        if let Some(plan) = &slideshow_bars {
             widgets::note(
                 ui,
                 format!(
@@ -998,6 +1071,13 @@ impl App {
                     fmt_time(plan.audio()),
                     plan.images
                 ),
+                "",
+            );
+        } else if custom_sections {
+            let bars = generator::planned_bars(p);
+            widgets::note(
+                ui,
+                format!("Set by the sections below: {bars} bars, {}.", fmt_time((bars + 1) as f64 * generator::secs_per_bar(p))),
                 "",
             );
         } else {
@@ -1050,6 +1130,9 @@ impl App {
                 }
             }
         }
+        }
+        if p.style.is_score() {
+            Self::sections_ui(ui, p, slideshow_bars.is_some());
         }
         widgets::subtitle(ui, "Character", "");
         amount(ui, "density", "Density", &mut p.density, ("sparse", "busy"), "How many notes, in every part");
@@ -1120,6 +1203,12 @@ impl App {
         if self.params.length_mode != LengthMode::Bars || self.params.target_bars != bars {
             self.params.length_mode = LengthMode::Bars;
             self.params.target_bars = bars;
+        }
+        // a score's sections keep their proportions
+        if let Some(sections) = self.params.custom_sections() {
+            if sections.iter().sum::<u32>() != bars {
+                self.params.sections = scale_sections(sections, bars);
+            }
         }
     }
 
@@ -2379,5 +2468,21 @@ fn amount(ui: &mut egui::Ui, id: &str, label: &str, v: &mut f32, ends: (&str, &s
     let mut x = *v as f64;
     if widgets::slider(ui, &spec, &mut x, true) {
         *v = x as f32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sections_scale_to_fit() {
+        assert_eq!(scale_sections(&[8, 20, 12, 4], 44), vec![8, 20, 12, 4]);
+        let s = scale_sections(&[8, 20, 12, 4], 22);
+        assert_eq!(s.iter().sum::<u32>(), 22);
+        assert_eq!(s, vec![4, 10, 6, 2]);
+        let s = scale_sections(&[1, 30, 1, 1, 1], 5);
+        assert_eq!(s, vec![1, 1, 1, 1, 1]);
+        assert_eq!(scale_sections(&[3, 5, 2], 101).iter().sum::<u32>(), 101);
     }
 }

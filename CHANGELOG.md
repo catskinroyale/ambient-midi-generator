@@ -5,9 +5,16 @@ All notable changes to this project are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-08
+
 ### Added
 - Scores: pieces written as one arc (intro, build, peak and outro, scaled to the chosen length) for a full orchestra, listed under **Scores** in the Style menu. The first is **Tech Trailer**, a hybrid trailer score for technology and the future: a lone felt piano motif over a sub drone and glassy grains; a build of pulsing synth arpeggio, heartbeat kick, ticking percussion, low string ostinato, rising strings, brass swells, risers and braams; a peak of big drums, sub hits, braams, brass and choir that can double up in the final third; and a lone piano to close on a soft hit. The seed varies the motif, arpeggio, ostinato, drums, brass and chords. Choosing a score switches a major key to minor and sets up its effects and mix.
 - A second score, **Megacity Rain**: dystopian neo-noir synthwave for a rain-soaked city at night. Rain, an evolving analogue drone, distant thunder, machinery and metal; a lone, mournful polysynth lead; then CS-80 brass in slow waves, sub-bass pulses, dark synth-brass stabs, neon buzz, soft distant drums in slow two-bar phrases and a smoky sax-like line in echo, building hypnotically without a climax and ending unresolved.
+- A third score, **Cathedral of Stars**: an epic, emotional score for space and time. A soft church-organ figure over a low drone; a ticking clock, a low string ostinato, swelling cello and viola lines, a tender piano theme, choir, rising strings, sub swells and brass gathering like a tide; a timpani roll into a climax of full organ, huge strings, brass, choir, timpani and low drums with the theme repeated and growing; a last chord held open with a major third; and the organ figure and clock alone, fading into silence.
+- Sections for scores: set the bars of each section of a score (its intro, build, peak and so on), or leave them scaled to the length. When the slideshow sets the length, they keep their proportions.
+- The Character sliders shape scores: Density sets when their layers come in and how busy their figures are, Variation substitutes chords and lets motifs and themes evolve, and Dynamics flattens or deepens the arc while keeping the climax where it is. Humanize also loosens Megacity Rain's rubato.
+- A Church Organ sound, and a pipe organ in the built-in synth.
+- A tuned timpani in Trailer FX (keys 96–107).
 - A Dark Stab preset (Synth Brass 2) in the Ambient Electronic SoundFont (17 in all).
 - New sounds in Trailer Kit and Trailer FX: a dull kick, a gated snare, rain, distant thunder, machinery hum, neon buzz, distant metal and an evolving analogue drone.
 - Three parts for the scores: Brass, Drums (on the General MIDI drum channel, with a choice of drum kit) and FX. They only show in Parts, the mixer and the assign dialog when the piece uses them.
@@ -97,7 +104,8 @@ All notable changes to this project are documented here. The project uses
 
 First release: seven ambient styles, seeded and repeatable generation, a built-in synth, GeneralUser GS SoundFont playback, MIDI and WAV export, and per-part switches and sounds.
 
-[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.2.0...v0.3.0

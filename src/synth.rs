@@ -273,6 +273,8 @@ const CHOIR: BowCfg = BowCfg { detunes: &[-9.0, 0.0, 8.0], attack: 0.8, release:
 const PAD: BowCfg = BowCfg { detunes: &[-10.0, 0.0, 10.0], attack: 1.6, release: 2.8, vibrato: 0.0, bright: 0.6 };
 const SAW_LEAD: BowCfg = BowCfg { detunes: &[-5.0, 5.0], attack: 0.12, release: 0.5, vibrato: 8.0, bright: 1.1 };
 const HALO: BowCfg = BowCfg { detunes: &[-14.0, 0.0, 13.0], attack: 1.4, release: 3.0, vibrato: 3.0, bright: 0.8 };
+/// A pipe organ: an 8' flue with 4' and 2 2/3' ranks, speaking quickly and steadily.
+const ORGAN: BowCfg = BowCfg { detunes: &[0.0, 1200.0, 1902.0], attack: 0.1, release: 0.4, vibrato: 0.0, bright: 0.5 };
 /// The CS-80's brass: bright, detuned saws that swell in.
 const SYNTH_BRASS: BowCfg = BowCfg { detunes: &[-7.0, 0.5, 6.5], attack: 0.3, release: 1.2, vibrato: 3.0, bright: 1.5 };
 
@@ -305,7 +307,9 @@ impl Bowed {
         let mut incs = [0.0; 3];
         for (i, d) in cfg.detunes.iter().take(3).enumerate() {
             phases[i] = hash01(seed + i as u32 * 17);
-            incs[i] = f0 * 2f32.powf(d * spread / 1200.0) / sr;
+            // an organ's ranks stay in tune with each other
+            let d = if d.abs() < 100.0 { d * spread } else { *d };
+            incs[i] = f0 * 2f32.powf(d / 1200.0) / sr;
         }
         // softer notes bow in more slowly
         let attack = cfg.attack * (1.0 - 0.45 * vel);
@@ -803,6 +807,7 @@ impl SynthEngine for BuiltinSynth {
             32..=39 => struck(Tone::Pluck { t60: 2.5, dark: 2.8 }, 0.42),
             46 => struck(Tone::Pluck { t60: 4.0, dark: 2.4 }, 0.34),
             45 | 109..=119 => struck(Tone::Pluck { t60: 1.0, dark: 2.6 }, 0.4),
+            16..=23 => bowed(ORGAN, 0.26),
             40 => bowed(VIOLIN, 0.32),
             41 => bowed(VIOLA, 0.32),
             42 => bowed(CELLO, 0.36),

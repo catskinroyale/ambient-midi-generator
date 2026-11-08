@@ -55,6 +55,8 @@ pub mod fx {
     pub const GRAINS: u8 = 72;
     /// A slowly evolving analogue drone, two octaves below the key.
     pub const ANALOG_DRONE: u8 = 84;
+    /// A concert timpani, tuned: its octave of keys plays C2 to B2.
+    pub const TIMPANI: u8 = 96;
 }
 
 /// The drum kit's General MIDI program: the Orchestra kit's place, so a General
@@ -141,6 +143,7 @@ pub fn effects(sr: f64) -> Vec<Sound> {
         one(fx::METAL, "Distant Metal", 0.4, metal(sr)),
         pitched(fx::GRAINS, "Glass Grains", 0.32, grains(sr)),
         pitched(fx::ANALOG_DRONE, "Analog Drone", 0.55, analog_drone(sr)),
+        pitched(fx::TIMPANI, "Timpani", 1.0, timpani(sr)),
     ]
 }
 
@@ -790,6 +793,32 @@ fn grains(sr: f64) -> Vec<f64> {
             *v = 0.0;
         }
     }
+    out
+}
+
+/// A tuned kettledrum: the membrane's inharmonic modes, the lowest ringing
+/// longest, settling onto pitch after the stroke, with a soft felt thump.
+fn timpani(sr: f64) -> Vec<f64> {
+    let f0 = made_hz(fx::BOOM);
+    // (ratio to the pitch, level, decay in seconds)
+    const MODES: [(f64, f64, f64); 6] =
+        [(0.5, 0.25, 0.5), (1.0, 1.0, 2.4), (1.5, 0.5, 1.6), (1.98, 0.3, 1.1), (2.44, 0.16, 0.8), (2.98, 0.1, 0.6)];
+    let mut oscs: Vec<Osc> = MODES.iter().map(|_| Osc::default()).collect();
+    let mut lp = Svf::default();
+    let mut noise = Noise::new(41);
+    let mut out: Vec<f64> = (0..len(sr, 4.5))
+        .map(|i| {
+            let t = i as f64 / sr;
+            let settle = 1.0 + 0.025 * (-t / 0.06).exp();
+            let mut x = 0.0;
+            for (osc, (ratio, amp, decay)) in oscs.iter_mut().zip(&MODES) {
+                x += amp * osc.next(f0 * ratio * settle, sr) * (-t / decay).exp();
+            }
+            let thump = lp.run(noise.next(), 500.0, 0.7, sr).low * (-t / 0.03).exp();
+            drive(x + 1.5 * thump, 1.4)
+        })
+        .collect();
+    fade(&mut out, sr, 0.001, 0.8);
     out
 }
 

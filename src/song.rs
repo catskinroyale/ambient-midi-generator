@@ -30,10 +30,11 @@ pub enum Style {
     NeonNoir,
     TechTrailer,
     MegacityRain,
+    StarCathedral,
 }
 
 impl Style {
-    pub const ALL: [Style; 23] = [
+    pub const ALL: [Style; 24] = [
         Style::EtherealPads,
         Style::Gymnopedie,
         Style::GenerativeLoops,
@@ -57,12 +58,23 @@ impl Style {
         Style::NeonNoir,
         Style::TechTrailer,
         Style::MegacityRain,
+        Style::StarCathedral,
     ];
 
     /// A score is written as one arc, intro to build to peak to outro, for a
     /// full orchestra with drums and trailer effects.
     pub fn is_score(self) -> bool {
-        matches!(self, Style::TechTrailer | Style::MegacityRain)
+        matches!(self, Style::TechTrailer | Style::MegacityRain | Style::StarCathedral)
+    }
+
+    /// The sections of a score, in order; none for a style.
+    pub fn score_sections(self) -> &'static [&'static str] {
+        match self {
+            Style::TechTrailer => &["Intro", "Build", "Peak", "Outro"],
+            Style::MegacityRain => &["Rain", "Lone lead", "Body", "Recede"],
+            Style::StarCathedral => &["Opening", "Build", "Climax", "Held chord", "Outro"],
+            _ => &[],
+        }
     }
 
     pub fn label(self) -> &'static str {
@@ -90,6 +102,7 @@ impl Style {
             Style::NeonNoir => "Neon Noir",
             Style::TechTrailer => "Tech Trailer",
             Style::MegacityRain => "Megacity Rain",
+            Style::StarCathedral => "Cathedral of Stars",
         }
     }
 
@@ -169,6 +182,12 @@ impl Style {
                  thunder and machinery; a lone, mournful lead; then CS-80 brass swells rolling in slow waves, sub-bass \
                  pulses, dark stabs, soft distant drums and a smoky sax-like line in echo, building hypnotically, never to a climax."
             }
+            Style::StarCathedral => {
+                "An epic score for the vastness of space and time. A soft pipe-organ figure over a low drone; a clock \
+                 ticking; a low string ostinato, swelling cellos and violas, a tender piano theme, choir, rising strings and \
+                 sub swells gathering like a tide; a climax of full organ, huge strings, brass, choir and timpani, held in an \
+                 open, shimmering chord; and the organ figure alone again, fading into silence."
+            }
         }
     }
 
@@ -197,6 +216,7 @@ impl Style {
             Style::NeonNoir => 56.0,
             Style::TechTrailer => 80.0,
             Style::MegacityRain => 66.0,
+            Style::StarCathedral => 64.0,
         }
     }
 
@@ -250,6 +270,12 @@ impl Style {
             Style::MegacityRain => Some(SuggestedSounds {
                 sounds: Sounds { keys: 98, pad: 62, lead: 81, bass: 38, pluck: 63, brass: 66, ..Sounds::default() },
                 electronic: &Inst::ALL,
+            }),
+            // church organ, slow strings, choir, cello, piano, brass, and the
+            // kit and effects for the clock, timpani and drones
+            Style::StarCathedral => Some(SuggestedSounds {
+                sounds: Sounds { keys: 19, pad: 49, lead: 52, bass: 42, pluck: 0, brass: 61, ..Sounds::default() },
+                electronic: &[Inst::Drums, Inst::Fx],
             }),
             _ => None,
         }
@@ -310,6 +336,19 @@ impl Style {
                 },
                 ..Fx::default()
             }),
+            // a vast, warm cathedral, kept clear of the sub, very wide, with a
+            // soft echo for the piano
+            Style::StarCathedral => Some(Fx {
+                space: Space::Cathedral,
+                size: 0.8,
+                tone: 0.5,
+                motion: 0.35,
+                predelay: 0.15,
+                low_cut: 0.55,
+                width: 0.9,
+                echo: Echo { time: EchoTime::DottedQuarter, feedback: 0.35, tone: 0.4, to_reverb: 0.6, ..Echo::default() },
+                ..Fx::default()
+            }),
             _ => None,
         }
     }
@@ -330,6 +369,16 @@ impl Style {
                     (Inst::Brass, -1.0, 0.65, 0.45),
                     (Inst::Drums, -6.0, 0.65, 0.1),
                     (Inst::Fx, -3.0, 0.4, 0.0),
+                ],
+                Style::StarCathedral => &[
+                    (Inst::Piano, -5.0, 0.75, 0.0),
+                    (Inst::StringPad, -5.0, 0.7, 0.0),
+                    (Inst::Violin, -5.0, 0.8, 0.0),
+                    (Inst::Cello, -5.0, 0.4, 0.0),
+                    (Inst::Pizzicato, -2.0, 0.7, 0.3),
+                    (Inst::Brass, -5.0, 0.6, 0.0),
+                    (Inst::Drums, -8.0, 0.55, 0.0),
+                    (Inst::Fx, -8.0, 0.35, 0.0),
                 ],
                 _ => &[
                     (Inst::Piano, 0.0, 0.7, 0.25),
@@ -402,6 +451,8 @@ impl Style {
             },
             // the lead stays a warm polysynth and the brass part the smoky sax
             Style::MegacityRain => Palette { brass: &[66], ..pal(&[98, 4], &[62, 88, 95], &[81, 50], &[38], &[63]) },
+            // the organ stays the organ, and the piano the piano
+            Style::StarCathedral => Palette { brass: &[61, 60], ..pal(&[19], &[49, 48], &[52, 53, 91], &[42, 48], &[0]) },
         }
     }
 }
@@ -539,6 +590,10 @@ pub struct Params {
     /// Notes switched off or reshaped in the piano roll.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edits: Vec<NoteEdit>,
+    /// For a score, the bars of each of its sections, set by hand. They set
+    /// the piece's length. Empty: the sections are scaled to the length.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<u32>,
 }
 
 pub const GENERATOR_VERSION: u32 = 3;
@@ -1060,6 +1115,7 @@ pub const SOUNDS: &[Sound] = &[
     snd(11, "Vibraphone", "Mallets & bells"),
     snd(12, "Marimba", "Mallets & bells"),
     snd(108, "Kalimba", "Mallets & bells"),
+    snd(19, "Church Organ", "Keys"),
     snd(46, "Harp", "Plucked"),
     snd(45, "Pizzicato Strings", "Plucked"),
     snd(24, "Nylon Guitar", "Plucked"),
@@ -1154,6 +1210,7 @@ impl Default for Params {
             version: GENERATOR_VERSION,
             mix: Mix::default(),
             edits: Vec::new(),
+            sections: Vec::new(),
         }
     }
 }
@@ -1204,6 +1261,13 @@ impl Params {
 
     /// Identifies the notes a piece has, whatever its sounds, effects, mix or
     /// note edits, so edits made on it can be found again.
+    /// The score's sections as set by hand, if they are set and fit its style.
+    pub fn custom_sections(&self) -> Option<&[u32]> {
+        let names = self.style.score_sections();
+        (!names.is_empty() && self.sections.len() == names.len() && self.sections.iter().all(|b| *b > 0))
+            .then_some(&self.sections[..])
+    }
+
     pub fn piece_id(&self) -> u64 {
         let notes = Params {
             sounds: Sounds::default(),
