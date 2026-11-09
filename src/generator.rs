@@ -3895,31 +3895,77 @@ impl<'a> Ctx<'a> {
             }
         };
 
-        // ---- the organ: the figure, rolling in eighths over each chord from
-        // the first bar to the last, with a low pedal beneath
+        // version 4: more organ figures and string ostinatos, and no drums
+        // From version 4, the organ has a wider set of figures, built on a
+        // ladder of six chord tones over two octaves: broken chords in eighths
+        // (rocking, sweeping, circling a held top note, or grouped 3+3+2) and
+        // rolling triplets. With the variation it may answer each second
+        // phrase with the figure turned upside down, and double into
+        // sixteenths at the climax.
+        const ORGAN: &[(u32, &[usize])] = &[
+            (8, &[0, 2, 1, 2, 0, 2, 1, 2]),
+            (8, &[0, 1, 2, 3, 2, 1, 2, 1]),
+            (8, &[0, 2, 3, 2, 1, 2, 3, 2]),
+            (8, &[0, 1, 2, 3, 4, 3, 2, 1]),
+            (8, &[0, 4, 1, 4, 2, 4, 1, 4]),
+            (8, &[0, 2, 4, 0, 2, 4, 1, 3]),
+            (8, &[4, 2, 0, 2, 3, 1, 2, 1]),
+            (12, &[0, 2, 4, 0, 2, 4, 1, 3, 5, 1, 3, 5]),
+            (12, &[0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 2, 3]),
+        ];
+        let new_figures = self.p.version >= 4;
+        let mut orng = self.rng("stars-organ");
+        let organ = [self.variant("organ", ORGAN.len() as u32) as usize; 2];
+        let organ = if new_figures && orng.chance(0.7 * v) { [organ[0], (organ[0] + 1 + orng.range(0, ORGAN.len() as i32 - 2) as usize) % ORGAN.len()] } else { organ };
+        let answer = new_figures && orng.chance(0.6 * v);
+        let double = new_figures && orng.chance(0.25 + 0.4 * v) && d >= 0.3;
+
+        // ---- the organ: the figure, rolling over each chord from the first
+        // bar to the last, with a low pedal beneath
         let mut prev = Vec::new();
         for b in 0..n.saturating_sub(1) {
             let in_hold = b >= hold && b < outro;
             let chord = self.harmony[b as usize].clone();
             let voicing = voice_lead(&chord.pitch_classes(&self.scale), &prev, 55, 74, false);
             prev = voicing.clone();
-            let t = [voicing[0], voicing[1], voicing[voicing.len() - 1], voicing[0] + 12];
-            let order: [usize; 8] = match figures[(b >= peak) as usize] {
-                0 => [0, 2, 1, 2, 0, 2, 1, 2],
-                1 => [0, 1, 2, 3, 2, 1, 2, 1],
-                _ => [0, 2, 3, 2, 1, 2, 3, 2],
-            };
             let it = self.it(b);
             let climax_bar = b >= peak && b < hold;
+            // the tones, the order they are played in, and how many to a bar
+            let (tones, order, per_bar): (Vec<i32>, Vec<usize>, u32) = if new_figures {
+                let ladder: Vec<i32> = voicing.iter().copied().chain(voicing.iter().map(|k| k + 12)).take(6).collect();
+                let (per, fig) = ORGAN[organ[(b >= peak) as usize]];
+                let mut order = fig.to_vec();
+                let section_start = [0, build, peak, outro].into_iter().filter(|s| *s <= b).max().unwrap_or(0);
+                if answer && (b - section_start) / 4 % 2 == 1 {
+                    let top = ladder.len() - 1;
+                    order = order.iter().map(|o| top - (*o).min(top)).collect();
+                }
+                if double && climax_bar && per == 8 {
+                    (ladder, order.repeat(2), 16)
+                } else {
+                    (ladder, order, per)
+                }
+            } else {
+                let t = vec![voicing[0], voicing[1], voicing[voicing.len() - 1], voicing[0] + 12];
+                let order = match figures[(b >= peak) as usize] {
+                    0 => vec![0, 2, 1, 2, 0, 2, 1, 2],
+                    1 => vec![0, 1, 2, 3, 2, 1, 2, 1],
+                    _ => vec![0, 2, 3, 2, 1, 2, 3, 2],
+                };
+                (t, order, 8)
+            };
             if !in_hold {
                 let fade = if b >= outro { 1.0 - (b - outro) as f64 / (n - outro) as f64 } else { 1.0 };
                 let vel = if climax_bar { 72.0 } else { (38.0 + 50.0 * it) * (0.5 + 0.5 * fade) };
                 let up = if climax_bar { 12 } else { 0 };
-                // sparse: in quarters
+                // sparse: half as many
                 let step = if d < 0.3 { 2 } else { 1 };
+                let len = bar / per_bar;
+                // accents where the figure's groups begin
+                let group = if per_bar == 12 { 3 } else { 4 * per_bar as usize / 8 };
                 for (i, o) in order.iter().enumerate().step_by(step) {
-                    let accent = if i % 4 == 0 { 6.0 } else { 0.0 };
-                    self.note(Inst::Piano, b * bar + i as u32 * e8, step as u32 * e8, t[*o] + up, vel + accent);
+                    let accent = if i % group == 0 { 6.0 } else { 0.0 };
+                    self.note(Inst::Piano, b * bar + i as u32 * len, step as u32 * len, tones[(*o).min(tones.len() - 1)] + up, vel + accent);
                 }
             }
             // the pedal: a soft drone at first, two octaves deep at the climax
@@ -4095,9 +4141,27 @@ impl<'a> Ctx<'a> {
         }
         self.swell(Inst::Violin, hold * bar, hold_span, 100.0, 90.0, 0.0);
 
+        // From version 4, more ostinatos, in sixteenths: (start, length,
+        // rung), the rungs climbing the chord's tones above the bass note:
+        // rocking root and octave, a broken chord up and down, groups of
+        // 3+3+2, a gallop, a dotted swing, and a climb to the tenth. With the
+        // variation, the climax may take another.
+        const OSTINATO: &[&[(u32, u32, usize)]] = &[
+            &[(0, 2, 0), (2, 2, 0), (4, 2, 2), (6, 2, 0), (8, 2, 0), (10, 2, 0), (12, 2, 2), (14, 2, 0)],
+            &[(0, 2, 0), (2, 2, 1), (4, 2, 2), (6, 2, 3), (8, 2, 2), (10, 2, 1), (12, 2, 2), (14, 2, 1)],
+            &[(0, 2, 0), (2, 2, 1), (4, 2, 2), (6, 2, 0), (8, 2, 1), (10, 2, 2), (12, 2, 0), (14, 2, 2)],
+            &[(0, 2, 0), (2, 1, 2), (3, 1, 1), (4, 2, 0), (6, 1, 2), (7, 1, 1), (8, 2, 0), (10, 1, 2), (11, 1, 1), (12, 2, 0), (14, 1, 2), (15, 1, 1)],
+            &[(0, 3, 0), (3, 1, 0), (4, 3, 1), (7, 1, 0), (8, 3, 2), (11, 1, 0), (12, 3, 1), (15, 1, 0)],
+            &[(0, 2, 0), (2, 2, 1), (4, 2, 2), (6, 2, 3), (8, 2, 4), (10, 2, 3), (12, 2, 2), (14, 2, 1)],
+            &[(0, 4, 0), (4, 2, 2), (6, 2, 1), (8, 4, 0), (12, 2, 2), (14, 2, 3)],
+        ];
+        let mut srng = self.rng("stars-ostinato");
+        let strings = self.variant("strings", OSTINATO.len() as u32) as usize;
+        let strings = [strings, if srng.chance(0.6 * v) { (strings + 1 + srng.range(0, OSTINATO.len() as i32 - 2) as usize) % OSTINATO.len() } else { strings }];
+
         // ---- the low string ostinato, on the pedal; at the climax doubled
         // an octave down and held beneath
-        for b in ostinato_from..hold {
+        for b in (ostinato_from..hold).filter(|_| !new_figures) {
             let root = pedal(self, b, 36);
             let (steps, octave_at): (&[u32], &[u32]) = match if d < 0.3 { 3 } else { ostinato } {
                 0 => (&[0, 1, 2, 3, 4, 5, 6, 7], &[2, 6]),
@@ -4111,6 +4175,27 @@ impl<'a> Ctx<'a> {
                 let key = if octave_at.contains(s) { root + 12 } else { root };
                 let accent = if s % 4 == 0 { 8.0 } else { 0.0 };
                 self.note(Inst::Cello, b * bar + s * e8, e8 * 4 / 5, key, vel + accent);
+            }
+            if climax && (b - peak) % 2 == 0 {
+                self.note(Inst::Cello, b * bar, 2 * bar, root - 12, 78.0);
+            }
+        }
+        for b in (ostinato_from..hold).filter(|_| new_figures) {
+            let root = pedal(self, b, 36);
+            // the bass note, then the chord's tones above it
+            let pcs = self.harmony[b as usize].pitch_classes(&self.scale);
+            let above: Vec<i32> = (root + 1..=root + 24).filter(|k| pcs.contains(&k.rem_euclid(12))).collect();
+            let rungs: Vec<i32> = [root].into_iter().chain(above.iter().copied().filter(|k| *k - root >= 5)).collect();
+            let climax = b >= peak;
+            let vel = if climax { 70.0 } else { 40.0 + 34.0 * rise(b) };
+            // sparse: a quarter-note pulse on the root and octave
+            let quarters: &[(u32, u32, usize)] = &[(0, 4, 0), (4, 4, 0), (8, 4, 0), (12, 4, 2)];
+            let pattern = if d < 0.3 { quarters } else { OSTINATO[strings[climax as usize]] };
+            for &(on, len, rung) in pattern {
+                // the octave above the bass for the third rung, whatever the chord
+                let key = if rung == 2 { root + 12 } else { rungs[rung.min(rungs.len() - 1)] };
+                let accent = if on % 8 == 0 { 8.0 } else if on % 4 == 0 { 3.0 } else { 0.0 };
+                self.note(Inst::Cello, b * bar + on * s16, len * s16 * 4 / 5, key, vel + accent);
             }
             if climax && (b - peak) % 2 == 0 {
                 self.note(Inst::Cello, b * bar, 2 * bar, root - 12, 78.0);
@@ -4148,8 +4233,9 @@ impl<'a> Ctx<'a> {
         self.swell(Inst::Brass, hold * bar, hold_span, 118.0, 80.0, 0.0);
 
         // ---- the clock, ticking from the build to the very end; low drums
-        // gathering late in the build and pounding at the climax
-        for b in build..n.saturating_sub(1) {
+        // gathering late in the build and pounding at the climax. From
+        // version 4 there are no drums: the timpani carries the climax.
+        for b in (build..n.saturating_sub(1)).filter(|_| !new_figures) {
             if b >= hold && b < outro {
                 continue;
             }
@@ -4168,12 +4254,12 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        for b in kick_from..roll {
+        for b in (kick_from..roll).filter(|_| !new_figures) {
             if (b - kick_from) % 2 == 0 {
                 self.note(Inst::Drums, b * bar, beat, drum::DEEP_KICK as i32, 56.0 + 16.0 * rise(b));
             }
         }
-        for b in peak..hold {
+        for b in (peak..hold).filter(|_| !new_figures) {
             let bs = b * bar;
             let phrase = (b - peak) % 4;
             if phrase == 0 && (b - peak) % 8 == 0 {
@@ -4933,6 +5019,32 @@ mod tests {
         }
     }
 
+    /// The seed picks among many organ figures and string ostinatos: their
+    /// rhythms and contours in a bar of the build differ from seed to seed.
+    #[test]
+    fn the_stars_figures_vary() {
+        let shape = |s: &Song, inst: Inst, b: u32| {
+            let bar = s.bar_ticks();
+            let notes: Vec<&Note> = s.notes.iter().filter(|n| n.inst == inst && n.start >= b * bar && n.start < (b + 1) * bar && n.dur < bar).collect();
+            let first = notes.first().map(|n| n.key as i32).unwrap_or(0);
+            notes.iter().map(|n| (n.start - b * bar, n.key as i32 - first)).collect::<Vec<_>>()
+        };
+        let (mut organ, mut strings) = (Vec::new(), Vec::new());
+        for seed in 1..=16 {
+            let p = Params { style: Style::StarCathedral, seed, tempo: 64.0, humanize: 0.0, target_seconds: 200.0, ..Params::default() };
+            let s = generate(&p);
+            let peak = section_starts(&p, s.bars)[1];
+            organ.push(shape(&s, Inst::Piano, 12));
+            strings.push(shape(&s, Inst::Cello, peak - 2));
+        }
+        for v in [&mut organ, &mut strings] {
+            v.sort();
+            v.dedup();
+        }
+        assert!(organ.len() >= 8, "{} organ figures", organ.len());
+        assert!(strings.len() >= 6, "{} ostinatos", strings.len());
+    }
+
     #[test]
     fn the_stars_rise_and_fall() {
         use crate::kit::{drum, fx};
@@ -4941,13 +5053,14 @@ mod tests {
             let s = generate(&p);
             let bar = s.bar_ticks();
             let end = s.bars * bar;
-            // the organ alone over the drone, then the clock
+            // the organ alone over the drone
             let opening: Vec<Inst> = s.notes.iter().filter(|n| n.start < 4 * bar).map(|n| n.inst).collect();
             assert!(opening.iter().all(|i| matches!(i, Inst::Piano | Inst::Fx)), "seed {seed}");
-            assert!(s.notes.iter().any(|n| n.inst == Inst::Drums && n.key == drum::TICK && n.start < end / 4));
-            // the climax: everything, loud, with timpani
+            // no drums
+            assert!(s.notes.iter().all(|n| n.inst != Inst::Drums), "seed {seed}");
+            // the climax: everything else, loud, with timpani
             let mid = |n: &&Note| n.start > end * 2 / 3 && n.start < end * 3 / 4;
-            for inst in Inst::ALL {
+            for inst in Inst::ALL.into_iter().filter(|i| *i != Inst::Drums) {
                 assert!(s.notes.iter().filter(mid).any(|n| n.inst == inst), "seed {seed}: no {inst:?} at the climax");
             }
             assert!(s.notes.iter().filter(mid).any(|n| n.inst == Inst::Fx && (fx::TIMPANI..fx::TIMPANI + 12).contains(&n.key)));
@@ -4956,11 +5069,13 @@ mod tests {
                 v.iter().sum::<f64>() / v.len().max(1) as f64
             };
             assert!(loud(end * 2 / 3, end * 3 / 4) > loud(0, end / 8) + 20.0, "seed {seed}");
-            // the outro: the organ figure and the clock, nothing else begins
+            // the outro: the organ figure, nothing else begins
             let outro: Vec<&Note> = s.notes.iter().filter(|n| n.start >= end * 9 / 10).collect();
-            assert!(outro.iter().all(|n| matches!(n.inst, Inst::Piano | Inst::Drums | Inst::Fx)), "seed {seed}");
-            assert!(outro.iter().all(|n| n.inst != Inst::Drums || n.key == drum::TICK));
+            assert!(outro.iter().all(|n| matches!(n.inst, Inst::Piano | Inst::Fx)), "seed {seed}");
         }
+        // recipes from version 3 keep their clock and drums
+        let old = generate(&Params { style: Style::StarCathedral, seed: 1, tempo: 64.0, version: 3, ..Params::default() });
+        assert!(old.notes.iter().any(|n| n.inst == Inst::Drums && n.key == drum::TICK));
     }
 
     /// Neon Glide: the opening is pad, kalimba and the city; the groove is

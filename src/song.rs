@@ -187,8 +187,8 @@ impl Style {
                  pulses, dark stabs, soft distant drums and a smoky sax-like line in echo, building hypnotically, never to a climax."
             }
             Style::StarCathedral => {
-                "An epic score for the vastness of space and time. A soft pipe-organ figure over a low drone; a clock \
-                 ticking; a low string ostinato, swelling cellos and violas, a tender piano theme, choir, rising strings and \
+                "An epic score for the vastness of space and time. A soft pipe-organ figure over a low drone; a low \
+                 string ostinato, swelling cellos and violas, a tender piano theme, choir, rising strings and \
                  sub swells gathering like a tide; a climax of full organ, huge strings, brass, choir and timpani, held in an \
                  open, shimmering chord; and the organ figure alone again, fading into silence."
             }
@@ -284,7 +284,8 @@ impl Style {
                 electronic: &Inst::ALL,
             }),
             // church organ, slow strings, choir, cello, piano, brass, and the
-            // kit and effects for the clock, timpani and drones
+            // the effects for the timpani and drones (and the kit for the clock in
+            // version 3 recipes)
             Style::StarCathedral => Some(SuggestedSounds {
                 sounds: Sounds { keys: 19, pad: 49, lead: 52, bass: 42, pluck: 0, brass: 61, ..Sounds::default() },
                 electronic: &[Inst::Drums, Inst::Fx],
@@ -632,7 +633,8 @@ pub struct Params {
     /// earlier versions keep their music. Version 2 added song forms, more
     /// progressions and arrangement changes between sections; version 3,
     /// variants of each style (accompaniment, bass, phrasing ...) chosen by
-    /// the seed, and note expression.
+    /// the seed, and note expression; version 4, more organ figures and
+    /// string ostinatos in Cathedral of Stars, and no drums there.
     #[serde(default = "first_version")]
     pub version: u32,
     /// The mixer: channels, which part plays through which, and the master level.
@@ -648,7 +650,7 @@ pub struct Params {
     pub sections: Vec<u32>,
 }
 
-pub const GENERATOR_VERSION: u32 = 3;
+pub const GENERATOR_VERSION: u32 = 4;
 
 fn first_version() -> u32 {
     1

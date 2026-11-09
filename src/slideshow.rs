@@ -44,6 +44,11 @@ pub struct Slideshow {
     /// Change images where the music marks a moment, letting each image's
     /// time vary around `hold`, rather than on an even count.
     pub follow_music: bool,
+    /// The folder of photos to export a video editor's timeline with.
+    pub folder: Option<std::path::PathBuf>,
+    pub order: crate::resolve::PhotoOrder,
+    /// Frames a second of the exported timeline and markers.
+    pub fps: u32,
 }
 
 impl Default for Slideshow {
@@ -57,6 +62,9 @@ impl Default for Slideshow {
             outro_bars: 2,
             show_on_timeline: true,
             follow_music: true,
+            folder: None,
+            order: crate::resolve::PhotoOrder::Name,
+            fps: 25,
         }
     }
 }

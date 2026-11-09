@@ -14,6 +14,7 @@ mod mixer;
 mod mixer_ui;
 mod player;
 mod project;
+mod resolve;
 mod reverb;
 mod rng;
 mod slideshow;

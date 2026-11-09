@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-09
+
+### Added
+- Slideshow timelines for DaVinci Resolve and Final Cut Pro. Choose the folder of photos (in name or date order) and the track is fitted to them; **Export for Resolve…** saves a timeline (`.fcpxml`) with each photo at its change and cross dissolves between them, and renders the soundtrack beside it, for **File › Import › Timeline**. **Save markers…** saves the image changes as Resolve timeline markers (`.edl`). The frame rate can be 24, 25, 30, 50 or 60.
+
+### Changed
+- Cathedral of Stars has many more arpeggios for the seed to choose from: nine organ figures (broken chords in eighths that rock, sweep, circle a held top note or group 3+3+2, and rolling triplets) and seven low string ostinatos (rocking root and octave, a broken chord up and down, 3+3+2 groups, a gallop, a dotted swing and a climb to the tenth). With Variation, both can change at the climax, the organ can double into sixteenths there, and it can answer every second phrase with its figure upside down. Recipes saved by earlier versions keep their music.
+- Cathedral of Stars has no drums: the clock, kicks, toms and crash are gone, and the timpani carries the climax. Recipes saved by earlier versions keep them.
+
 ## [0.7.0] - 2026-11-08
 
 ### Added
@@ -114,7 +123,8 @@ All notable changes to this project are documented here. The project uses
 
 First release: seven ambient styles, seeded and repeatable generation, a built-in synth, GeneralUser GS SoundFont playback, MIDI and WAV export, and per-part switches and sounds.
 
-[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/catskinroyale/ambient-midi-generator/compare/v0.4.0...v0.5.0

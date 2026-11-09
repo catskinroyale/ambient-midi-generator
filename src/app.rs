@@ -18,6 +18,7 @@ use crate::mixer::{Meters, Mixer};
 use crate::mixer_ui::{MixerView, PartInfo};
 use crate::player::{Cmd, Player, Timeline, render_wav};
 use crate::rng::Rng;
+use crate::resolve::{self, PhotoOrder};
 use crate::slideshow::{self, Accents, Fit, Grid, Plan, Slideshow};
 use crate::song::{
     ELECTRONIC_FONT, EchoTime, Expr, Fx, Inst, Instrumentation, Interval, LengthMode, Mix, Note, Params, Song,
@@ -31,6 +32,8 @@ struct Export {
     progress: Arc<AtomicU32>,
     handle: Option<std::thread::JoinHandle<Result<(), String>>>,
     path: PathBuf,
+    /// A timeline written beside the audio, for the status line.
+    timeline: Option<PathBuf>,
 }
 
 pub struct App {
@@ -68,6 +71,10 @@ pub struct App {
     slide_cache: std::cell::RefCell<Option<(Slideshow, u64, Plan)>>,
     /// Counts the songs generated, to tell when the plan is out of date.
     song_rev: u64,
+    /// The photos in the slideshow's folder, and the folder and order they
+    /// were listed for.
+    photos: Vec<PathBuf>,
+    photos_for: Option<(PathBuf, PhotoOrder)>,
     /// A new seed or style picks the parts' sounds from the style's palette.
     vary_sounds: bool,
     /// The style and seed the sounds were last picked for.
@@ -277,6 +284,8 @@ impl App {
             accents,
             slide_cache: Default::default(),
             song_rev: 0,
+            photos: Vec::new(),
+            photos_for: None,
             vary_sounds,
             sounds_for: (Style::EtherealPads, 0),
             about: About::default(),
@@ -901,7 +910,116 @@ impl App {
         let song = self.song_as_heard();
         let (pr, p2) = (progress.clone(), path.clone());
         let handle = std::thread::spawn(move || render_wav(&song, engine, 44100, &p2, &pr));
-        self.export = Some(Export { progress, handle: Some(handle), path });
+        self.export = Some(Export { progress, handle: Some(handle), path, timeline: None });
+    }
+
+    /// The photos in the slideshow's folder, scanned again when the folder
+    /// or order changes; fitting the track to the images, their number.
+    fn sync_photos(&mut self) {
+        let want = self.slideshow.folder.clone().map(|f| (f, self.slideshow.order));
+        if want != self.photos_for {
+            self.photos = match &want {
+                Some((folder, order)) => resolve::photos(folder, *order).unwrap_or_else(|e| {
+                    self.status = e;
+                    Vec::new()
+                }),
+                None => Vec::new(),
+            };
+            self.photos_for = want;
+        }
+        if self.slideshow.fit == Fit::TrackToImages && !self.photos.is_empty() {
+            self.slideshow.images = self.photos.len() as u32;
+        }
+    }
+
+    fn choose_photo_folder(&mut self) {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(f) = &self.slideshow.folder {
+            dialog = dialog.set_directory(f);
+        }
+        if let Some(folder) = dialog.pick_folder() {
+            self.slideshow.folder = Some(folder);
+            // the track follows the photos
+            self.slideshow.fit = Fit::TrackToImages;
+            self.photos_for = None;
+            self.sync_photos();
+            self.status = format!("{} photos", self.photos.len());
+        }
+    }
+
+    /// The plan, if it is for the song as generated; a track fitted to the
+    /// images must be generated at its new length first.
+    fn plan_for_export(&mut self) -> Option<Plan> {
+        let plan = self.slide_plan();
+        if self.slideshow.fit == Fit::TrackToImages && plan.bars() != self.song.bars + 1 {
+            self.status = "Generate the piece at the slideshow's length first".into();
+            return None;
+        }
+        if plan.images == 0 {
+            self.status = "The track is too short for an image between the intro and outro".into();
+            return None;
+        }
+        Some(plan)
+    }
+
+    /// Render the soundtrack and write a timeline beside it for DaVinci
+    /// Resolve (or Final Cut Pro): each photo at its change, cross
+    /// dissolves between them, the soundtrack beneath.
+    fn export_for_resolve(&mut self) {
+        if self.export.is_some() {
+            return;
+        }
+        self.photos_for = None;
+        self.sync_photos();
+        if self.photos.is_empty() {
+            self.status = "Choose a folder of photos first".into();
+            return;
+        }
+        let Some(plan) = self.plan_for_export() else { return };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Final Cut Pro XML timeline", &["fcpxml"])
+            .set_file_name(format!("{}.fcpxml", self.params.file_stem()))
+            .save_file()
+        else {
+            return;
+        };
+        let wav = path.with_extension("wav");
+        let engine = match self.engine_for(44100, Meters::new()) {
+            Ok(e) => e,
+            Err(e) => {
+                self.status = e;
+                return;
+            }
+        };
+        let song = self.song_as_heard();
+        let audio_secs = Timeline::from_song(&song).duration;
+        let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| self.params.title());
+        let fps = self.slideshow.fps;
+        let xml = resolve::fcpxml(&plan, &self.photos, &wav, audio_secs, self.slideshow.fade as f64, fps, &title);
+        if let Err(e) = std::fs::write(&path, xml) {
+            self.status = format!("Could not save the timeline: {e}");
+            return;
+        }
+        let progress = Arc::new(AtomicU32::new(0));
+        let (pr, w2) = (progress.clone(), wav.clone());
+        let handle = std::thread::spawn(move || render_wav(&song, engine, 44100, &w2, &pr));
+        self.export = Some(Export { progress, handle: Some(handle), path: wav, timeline: Some(path) });
+    }
+
+    /// Save the image changes as markers for a Resolve timeline.
+    fn save_markers(&mut self) {
+        let Some(plan) = self.plan_for_export() else { return };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("EDL markers", &["edl"])
+            .set_file_name(format!("{}_markers.edl", self.params.file_stem()))
+            .save_file()
+        else {
+            return;
+        };
+        self.status = match std::fs::write(&path, resolve::marker_edl(&plan, self.slideshow.fps, &self.params.title())) {
+            Ok(()) => format!("Saved {} markers to {}", plan.images + 1, path.display()),
+            Err(e) => format!("Could not save the markers: {e}"),
+        };
     }
 
     // ------------------------------------------------------------------ ui
@@ -1368,6 +1486,8 @@ impl App {
             s.outro_bars = v as u32;
         }
 
+        self.photos_ui(ui);
+
         let plan = self.slide_plan();
         let t = Tokens::get(ui.ctx());
         let s = &self.slideshow;
@@ -1376,6 +1496,8 @@ impl App {
         let mut save = false;
         let mut show = s.show_on_timeline;
         let mut follow = s.follow_music;
+        let (mut resolve_export, mut markers) = (false, false);
+        let exporting = self.export.is_some();
         widgets::inset(ui, |ui| {
             let headline = match s.fit {
                 Fit::ImagesToTrack => format!("{} images", plan.images),
@@ -1452,6 +1574,23 @@ impl App {
                     .on_hover_text("Save each image's start and end time as a CSV file")
                     .clicked();
             });
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                resolve_export = widgets::text_button(ui, "Export for Resolve…", false, plan.images > 0 && !exporting)
+                    .on_hover_text(
+                        "Choose a folder of photos above, then save a timeline (.fcpxml) and the soundtrack (.wav) \
+                         beside it. In DaVinci Resolve, File › Import › Timeline puts each photo at its change, with \
+                         cross dissolves, over the music. Final Cut Pro opens it too.",
+                    )
+                    .clicked();
+                markers = widgets::text_button(ui, "Save markers…", false, plan.images > 0)
+                    .on_hover_text(
+                        "Save the image changes as timeline markers (.edl). In Resolve, right-click the timeline and \
+                         choose Timelines › Import › Timeline Markers from EDL. They start at 01:00:00:00, where \
+                         Resolve's timelines start.",
+                    )
+                    .clicked();
+            });
             ui.add_space(4.0);
             ui.checkbox(&mut follow, "Change images on the music's accents").on_hover_text(
                 "Move each change to where the music marks a moment (a new section or phrase, a chord change, a \
@@ -1469,6 +1608,80 @@ impl App {
         if save {
             self.save_cue_list(&plan);
         }
+        if resolve_export {
+            self.export_for_resolve();
+        }
+        if markers {
+            self.save_markers();
+        }
+    }
+
+    /// The folder of photos for a video editor's timeline, their order, and
+    /// the timeline's frame rate.
+    fn photos_ui(&mut self, ui: &mut egui::Ui) {
+        widgets::subtitle(ui, "Photos", "For a timeline with the photos in place, for DaVinci Resolve or Final Cut Pro");
+        let mut choose = false;
+        let mut clear = false;
+        widgets::inset(ui, |ui| ui.horizontal(|ui| {
+            let label = if self.slideshow.folder.is_some() { "Change folder…" } else { "Choose photo folder…" };
+            choose = widgets::text_button(ui, label, false, true)
+                .on_hover_text("The photos for the slideshow, all in one folder. The track is fitted to their number.")
+                .clicked();
+            if self.slideshow.folder.is_some() {
+                clear = widgets::text_button(ui, "Clear", false, true).on_hover_text("Forget the photo folder").clicked();
+            }
+        }));
+        if choose {
+            self.choose_photo_folder();
+        }
+        if clear {
+            self.slideshow.folder = None;
+            self.sync_photos();
+        }
+        if let Some(folder) = &self.slideshow.folder {
+            let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| folder.display().to_string());
+            let count = self.photos.len();
+            widgets::note(ui, format!("{name}: {count} photo{}", if count == 1 { "" } else { "s" }), &folder.display().to_string());
+            let segs = [
+                widgets::Segment {
+                    label: "By name",
+                    selected: self.slideshow.order == PhotoOrder::Name,
+                    enabled: true,
+                    help: "In file name order, numbers counted as numbers (IMG_2 before IMG_10)",
+                },
+                widgets::Segment {
+                    label: "By date",
+                    selected: self.slideshow.order == PhotoOrder::Date,
+                    enabled: true,
+                    help: "Oldest first, by when each file was last changed",
+                },
+            ];
+            match widgets::segmented(ui, &segs, 2) {
+                Some(0) => self.slideshow.order = PhotoOrder::Name,
+                Some(_) => self.slideshow.order = PhotoOrder::Date,
+                None => {}
+            }
+            if self.slideshow.fit == Fit::ImagesToTrack && count > 0 {
+                let images = self.slide_plan().images as usize;
+                if images != count {
+                    widgets::note(
+                        ui,
+                        if images < count {
+                            format!("The track holds {images} images, so the last {} photos are left out. Choose Track for images to fit the track to them.", count - images)
+                        } else {
+                            format!("The track holds {images} images, so the last {} changes have no photo. Choose Track for images to fit the track to them.", images - count)
+                        },
+                        "",
+                    );
+                }
+            }
+        }
+        let fps = &mut self.slideshow.fps;
+        widgets::dropdown(ui, "fps", "Frame rate", &format!("{fps} fps"), "The frame rate of the timeline and markers; match your Resolve project", |ui| {
+            for r in resolve::FRAME_RATES {
+                ui.selectable_value(fps, r, format!("{r} fps"));
+            }
+        });
     }
 
     /// After a style change: switch to the new style's suggested sounds (the
@@ -2450,7 +2663,10 @@ impl eframe::App for App {
             if ex.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
                 let res = ex.handle.take().map(|h| h.join().unwrap_or(Err("export thread panicked".into())));
                 self.status = match res {
-                    Some(Ok(())) => format!("Exported {}", ex.path.display()),
+                    Some(Ok(())) => match &ex.timeline {
+                        Some(t) => format!("Exported {} and {}", t.display(), ex.path.display()),
+                        None => format!("Exported {}", ex.path.display()),
+                    },
                     Some(Err(e)) => format!("Export failed: {e}"),
                     None => String::new(),
                 };
@@ -2480,6 +2696,7 @@ impl eframe::App for App {
             .show(ui, |ui| self.piano_roll(ui));
 
         self.sync_seed_sounds();
+        self.sync_photos();
         self.sync_slideshow_length();
         // Wait until a slider drag is released so playback isn't constantly restarted.
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
